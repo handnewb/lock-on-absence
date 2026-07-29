@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/handnewb/lock-on-absence)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-3.2.1-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
+[![Version](https://img.shields.io/badge/version-3.3-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
 
 ---
 
@@ -384,7 +384,14 @@ python lock-on-absence.py --check-interval 3
 
 ## Changelog
 
-### v3.2.1 — Aggressive Stealth Release (current)
+### v3.3 — Auto-Calibrated Recognition Threshold (current)
+- **New:** recognition threshold auto-calibrated during enrollment — adapts to YOUR face and lighting
+- Threshold saved to `face_model.json` alongside `face_model.yml`
+- Formula: `mean_confidence + 2.5 × stddev`, clamped 30–95
+- `lock-on-absence.py` reads calibrated threshold automatically; falls back to 85 if no JSON
+- `face_model.json` added to `.gitignore` (personal biometric data)
+
+### v3.2.1 — Aggressive Stealth Release
 - StealthCamera now uses default backend + `del cap` + `gc.collect()` for stronger hardware release
 - Removed explicit CAP_DSHOW/V4L2 backend selection in StealthCamera (default releases faster)
 

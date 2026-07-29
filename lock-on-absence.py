@@ -49,7 +49,7 @@ MIN_NEIGHBORS = 2           # more sensitive (streak confirmation prevents false
 MIN_FACE_SIZE = (30, 30)    # detects faces up to ~1.5m away
 FRAME_WIDTH = 640
 POST_LOCK_COOLDOWN = 30
-RECOGNITION_THRESHOLD = 85  # more tolerant (lower = stricter)
+RECOGNITION_THRESHOLD = 85  # fallback default — overridden by face_model.json if present
 
 # Paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -62,6 +62,7 @@ def recognize_owner(
     recognizer: cv2.face.LBPHFaceRecognizer,
     gray_frame: np.ndarray,
     face_rect: tuple,
+    threshold: float = RECOGNITION_THRESHOLD,
 ) -> tuple[bool, float]:
     """
     Return (is_owner, confidence).
@@ -70,7 +71,7 @@ def recognize_owner(
     x, y, w, h = face_rect
     roi = cv2.resize(gray_frame[y : y + h, x : x + w], (200, 200))
     _label, confidence = recognizer.predict(roi)
-    return confidence < RECOGNITION_THRESHOLD, confidence
+    return confidence < threshold, confidence
 
 
 # ── Main ───────────────────────────────────────────────────────────
@@ -135,11 +136,22 @@ def main() -> None:
     # ── Recognition model (optional) ──
     recognizer = None  # type: cv2.face.LBPHFaceRecognizer | None
     body_detector = BodyDetector()
+    recognition_threshold = RECOGNITION_THRESHOLD
     if os.path.exists(args.model):
         rec = cv2.face.LBPHFaceRecognizer_create()
         rec.read(args.model)
         recognizer = rec
         log(f"Face model loaded: {args.model}")
+        # Try to load calibrated threshold from face_model.json
+        import json
+        meta_path = str(Path(args.model).with_suffix(".json"))
+        if os.path.exists(meta_path):
+            with open(meta_path) as f:
+                meta = json.load(f)
+            recognition_threshold = meta.get("threshold", RECOGNITION_THRESHOLD)
+            log(f"Recognition threshold: {recognition_threshold:.0f} (auto-calibrated from {meta.get('samples', '?')} samples)")
+        else:
+            log(f"Recognition threshold: {recognition_threshold} (default — re-run enroll.py for auto-calibration)")
         log("Mode: OWNER RECOGNITION (only your face prevents lock)")
     else:
         log(f"No face model at {args.model} — run 'python enroll.py' first.")
@@ -230,7 +242,7 @@ def main() -> None:
                 owner_present = False
             elif recognizer is not None:
                 for rect in faces:
-                    is_owner, _conf = recognize_owner(recognizer, gray, rect)
+                    is_owner, _conf = recognize_owner(recognizer, gray, rect, recognition_threshold)
                     if is_owner:
                         owner_present = True
                         break

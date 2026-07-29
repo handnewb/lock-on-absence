@@ -118,6 +118,33 @@ def main() -> None:
 
     recognizer.write(args.output)
     log(f"Model saved to: {args.output}")
+
+    # ── Auto-calibrate recognition threshold ──
+    log("Calibrating recognition threshold...")
+    confidences = []
+    for sample in faces_data:
+        _label, conf = recognizer.predict(sample)
+        confidences.append(conf)
+    mean_conf = float(np.mean(confidences))
+    std_conf = float(np.std(confidences))
+    # Threshold = mean + 2.5σ, clamped between 30 and 95
+    calibrated = max(min(mean_conf + 2.5 * std_conf, 95.0), 30.0)
+    log(f"  Mean confidence: {mean_conf:.1f}")
+    log(f"  Std deviation:   {std_conf:.1f}")
+    log(f"  Calibrated threshold: {calibrated:.0f} (lower = stricter, default was 85)")
+
+    # Save threshold alongside model
+    import json
+    meta_path = str(Path(args.output).with_suffix(".json"))
+    with open(meta_path, "w") as f:
+        json.dump({
+            "threshold": round(calibrated, 1),
+            "mean_confidence": round(mean_conf, 1),
+            "std_confidence": round(std_conf, 1),
+            "samples": len(faces_data),
+        }, f, indent=2)
+    log(f"Threshold saved to: {meta_path}")
+
     log("")
     log("Enrollment complete! Run: python lock-on-absence.py")
 

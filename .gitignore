@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 face_model.yml
+face_model.json
 *.egg-info/
 dist/
 build/
