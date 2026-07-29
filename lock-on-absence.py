@@ -133,8 +133,8 @@ def main() -> None:
         help="Seconds to pause monitoring when camera is in use by another app (default: 30)",
     )
     parser.add_argument(
-        "--anti-spoof-timeout", type=int, default=15,
-        help="Max seconds face can be perfectly still before locking as potential photo attack (default: 15, 0=disable)",
+        "--anti-spoof-timeout", type=int, default=0,
+        help="Max seconds face can be perfectly still before locking (default: 0=off, suggested: 15)",
     )
     parser.add_argument(
         "--event-log", action="store_true",
