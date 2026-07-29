@@ -188,6 +188,9 @@ def main() -> None:
             with open(meta_path) as f:
                 meta = json.load(f)
             recognition_threshold = meta.get("threshold", RECOGNITION_THRESHOLD)
+            users_map = meta.get("users", {})
+            if users_map:
+                log(f"Authorized users: {', '.join(users_map.values())}")
             log(f"Recognition threshold: {recognition_threshold:.0f} (auto-calibrated from {meta.get('samples', '?')} samples)")
         else:
             log(f"Recognition threshold: {recognition_threshold} (default — re-run enroll.py for auto-calibration)")
