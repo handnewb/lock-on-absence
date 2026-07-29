@@ -288,7 +288,8 @@ def main() -> None:
 
     absence_start: float | None = None
     locked = False
-    was_awake = False  # track keep-awake state to avoid redundant calls
+    was_awake = False
+    intruder_streak = 0     # consecutive frames where face != owner
 
     try:
         while True:
@@ -313,7 +314,7 @@ def main() -> None:
                 owner_present = True  # any face = owner
 
             if owner_present:
-                # Owner present: keep screen awake, reset lock timer
+                intruder_streak = 0
                 if keep_awake_enabled and not was_awake:
                     keep_awake()
                     was_awake = True
@@ -323,7 +324,6 @@ def main() -> None:
                 absence_start = None
                 locked = False
             else:
-                # No owner: allow sleep
                 if was_awake:
                     allow_sleep()
                     was_awake = False
@@ -332,26 +332,31 @@ def main() -> None:
                     time.sleep(args.check_interval)
                     continue
 
-                # INTRUDER: face detected but NOT the owner -> instant lock
+                # Face detected but NOT owner -> increment streak
                 if len(faces) > 0 and recognizer is not None:
-                    if args.no_lock:
-                        log(">>> [DRY-RUN] Would lock NOW (intruder detected)")
-                    else:
-                        log(">>> LOCKING NOW (intruder detected)")
-                        lock_screen()
-                        locked = True
-                        log(f"Cooldown {POST_LOCK_COOLDOWN}s...")
-                    absence_start = None
+                    intruder_streak += 1
+                    if intruder_streak >= 2:
+                        if args.no_lock:
+                            log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
+                        else:
+                            log(">>> LOCKING NOW (intruder confirmed)")
+                            lock_screen()
+                            locked = True
+                            intruder_streak = 0
+                            log(f"Cooldown {POST_LOCK_COOLDOWN}s...")
+                        absence_start = None
+                    # else: first unconfirmed sighting, wait one more frame
                 else:
-                    # EMPTY: no face at all -> use normal delay
+                    # No face at all -> use normal delay
+                    intruder_streak = 0
                     if absence_start is None:
                         absence_start = time.time()
                         log(f"No face — waiting {args.delay}s...")
                     elif time.time() - absence_start >= args.delay:
                         if args.no_lock:
-                            log(f">>> [DRY-RUN] Would lock now (nobody present)")
+                            log(">>> [DRY-RUN] Would lock now (nobody present)")
                         else:
-                            log(f">>> LOCKING (nobody present)")
+                            log(">>> LOCKING (nobody present)")
                             lock_screen()
                             locked = True
                             log(f"Cooldown {POST_LOCK_COOLDOWN}s...")
