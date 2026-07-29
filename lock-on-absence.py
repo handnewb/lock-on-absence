@@ -141,6 +141,10 @@ def main() -> None:
         help="Write security events to Windows Event Log / Linux syslog",
     )
     parser.add_argument(
+        "--siem", type=str, default=None,
+        help="Write structured JSON events to this file for SIEM ingestion (Splunk, Sentinel, etc.)",
+    )
+    parser.add_argument(
         "--yunet", action="store_true",
         help="Use YuNet DNN face detector (downloads model if needed, much better than Haar)",
     )
@@ -148,9 +152,11 @@ def main() -> None:
 
     # ── Logger + Event log ──
     log = Logger(args.log_file)
-    event_log = EventLogger(args.event_log)
+    event_log = EventLogger(args.event_log, args.siem)
     if args.event_log:
         log(f"Event log: {'Windows Event Log' if sys.platform == 'win32' else 'syslog'} enabled")
+    if args.siem:
+        log(f"SIEM export: {args.siem} (JSON lines)")
 
     # ── Detector (YuNet or Haar) ──
     if args.yunet:

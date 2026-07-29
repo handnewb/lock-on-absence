@@ -2,6 +2,7 @@
 """Shared utilities for Lock on Absence — face detection, body detection, camera, logging."""
 
 import os
+import json
 import signal
 import subprocess
 import sys
@@ -411,7 +412,7 @@ def _eventlog_linux(message: str, level: str = "WARNING") -> None:
 
 
 class EventLogger:
-    """Writes security events to OS event log + file log."""
+    """Writes security events to OS event log + optional SIEM file (JSON/CEF)."""
 
     # Event IDs
     LOCK_INTRUDER = 1001
@@ -420,31 +421,61 @@ class EventLogger:
     LOCK_BODY_TIMEOUT = 1004
     ERROR_CAMERA = 2001
 
-    def __init__(self, enabled: bool = False):
-        self.enabled = enabled and sys.platform in ("win32", "linux")
+    _EVENT_NAMES = {
+        1001: "intruder_lock",
+        1002: "absence_lock",
+        1003: "spoof_lock",
+        1004: "body_timeout_lock",
+        2001: "camera_error",
+    }
 
-    def _emit(self, event_id: int, message: str, level: str = "WARNING") -> None:
-        if not self.enabled:
-            return
-        if sys.platform == "win32":
-            _eventlog_windows(event_id, message, level)
-        else:
-            _eventlog_linux(message, level)
+    def __init__(self, enabled: bool = False, siem_path: str | None = None):
+        self.enabled = enabled and sys.platform in ("win32", "linux")
+        self.siem_path = siem_path
+
+    def _emit(self, event_id: int, message: str, level: str = "WARNING", extra: dict | None = None) -> None:
+        if self.enabled:
+            if sys.platform == "win32":
+                _eventlog_windows(event_id, message, level)
+            else:
+                _eventlog_linux(message, level)
+        if self.siem_path:
+            self._write_siem(event_id, message, extra or {})
+
+    def _write_siem(self, event_id: int, message: str, extra: dict) -> None:
+        """Append structured event to SIEM file."""
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "event_id": event_id,
+            "event": self._EVENT_NAMES.get(event_id, "unknown"),
+            "message": message,
+            "hostname": os.uname().nodename if hasattr(os, "uname") else os.environ.get("COMPUTERNAME", "unknown"),
+            **extra,
+        }
+        try:
+            with open(self.siem_path, "a", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False)
+                f.write("\n")
+        except OSError:
+            pass
 
     def intruder_lock(self) -> None:
         self._emit(self.LOCK_INTRUDER, "Screen locked: intruder detected (non-owner face)", "WARN")
 
     def absence_lock(self, seconds: float) -> None:
-        self._emit(self.LOCK_ABSENCE, f"Screen locked: owner absent for {seconds:.0f}s", "INFO")
+        msg = f"Screen locked: owner absent for {seconds:.0f}s"
+        self._emit(self.LOCK_ABSENCE, msg, "INFO", {"absence_seconds": round(seconds)})
 
     def spoof_lock(self, seconds: float) -> None:
-        self._emit(self.LOCK_SPOOF, f"Screen locked: possible photo attack (static face {seconds:.0f}s)", "WARN")
+        msg = f"Screen locked: possible photo attack (static face {seconds:.0f}s)"
+        self._emit(self.LOCK_SPOOF, msg, "WARN", {"static_seconds": round(seconds)})
 
     def body_timeout_lock(self, seconds: float) -> None:
-        self._emit(self.LOCK_BODY_TIMEOUT, f"Screen locked: body-only timeout ({seconds:.0f}s without face)", "WARN")
+        msg = f"Screen locked: body-only timeout ({seconds:.0f}s without face)"
+        self._emit(self.LOCK_BODY_TIMEOUT, msg, "WARN", {"body_only_seconds": round(seconds)})
 
     def camera_error(self, detail: str) -> None:
-        self._emit(self.ERROR_CAMERA, f"Camera error: {detail}", "ERROR")
+        self._emit(self.ERROR_CAMERA, f"Camera error: {detail}", "ERROR", {"detail": detail})
 #  Keep-awake (Windows + Linux)
 # ═══════════════════════════════════════════════════════════════════════
 

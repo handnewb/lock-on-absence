@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 face_model.yml
 face_model.json
+lock-events.json
 *.onnx
 *.egg-info/
 dist/
