@@ -200,6 +200,7 @@ python lock-on-absence.py [OPTIONS]
 | `--model PATH` | `./face_model.yml` | Path to trained LBPH model |
 | `--cooldown SECONDS` | `30` | Silence period after locking before monitoring resumes |
 | `--log-file PATH` | off | Also write timestamped log to a file |
+| `--max-body-only SECONDS` | `60` | Max time body detection holds unlock without face re-verification |
 
 ### `enroll.py`
 
@@ -376,7 +377,14 @@ python lock-on-absence.py --check-interval 3
 
 ## Changelog
 
-### v3.0 — Refactor + Keep-Awake Fix + Auto-Calibration (current)
+### v3.1 — Body-Only Timeout + Security Hardening (current)
+- **New:** `--max-body-only` flag — max time body detection holds unlock without face re-verification (default 60s)
+- **Security fix:** body reference frame only updates when face IS recognized (was: updated during body-only mode, allowing attacker's body to become the new reference)
+- **Security fix:** mandatory periodic face re-verification — body detection alone cannot hold the screen unlocked indefinitely
+- Body-detect log now shows countdown: "body present, re-verify in 45s"
+- Lock reason now explicit: "body-only timeout: 65s > 60s"
+
+### v3.0 — Refactor + Keep-Awake Fix + Auto-Calibration
 - **New:** `face_utils.py` — shared module (face detection, body detection, camera, logging)
 - **Fixed:** Linux keep-awake now uses a persistent `systemd-inhibit` subprocess (was broken — `true` exited immediately)
 - **Fixed:** macOS keep-awake via `caffeinate` subprocess

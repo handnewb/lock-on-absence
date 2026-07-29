@@ -109,6 +109,10 @@ def main() -> None:
         "--log-file", type=str, default=None,
         help="Also write log output to a file",
     )
+    parser.add_argument(
+        "--max-body-only", type=int, default=60,
+        help="Max seconds body detection keeps screen unlocked without face re-verification (default: 60)",
+    )
     args = parser.parse_args()
 
     # ── Logger ──
@@ -151,7 +155,8 @@ def main() -> None:
     lock_label = "DRY-RUN" if args.no_lock else "ACTIVE LOCK"
     awake_label = "keep-awake ON" if keep_awake_mgr else "keep-awake OFF"
     body_label = f"body-detect ON ({body_detector.status})" if recognizer else "body-detect OFF"
-    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  cooldown={args.cooldown}s  [{lock_label}]  [{awake_label}]  [{body_label}]")
+    max_body_label = f"max-body-only={args.max_body_only}s" if recognizer else ""
+    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  cooldown={args.cooldown}s  {max_body_label}  [{lock_label}]  [{awake_label}]  [{body_label}]")
     log("Press Ctrl+C to stop")
 
     # ── State machine ──
@@ -159,6 +164,8 @@ def main() -> None:
     locked_until: float = 0.0
     was_awake = False
     intruder_streak = 0
+    last_face_time: float = time.time()  # assume owner starts present
+    max_body_only: float = float(args.max_body_only) if recognizer else float("inf")
 
     # Track body-detect status for one-time log messages
     _body_detect_active = False
@@ -199,11 +206,13 @@ def main() -> None:
                     log("Owner face detected — body-detect disengaged")
                     _body_detect_active = False
 
+                last_face_time = now  # reset re-verification timer
+
                 if keep_awake_mgr and not was_awake:
                     keep_awake_mgr.enable()
                     was_awake = True
 
-                # Update body reference frame periodically
+                # Update body reference frame periodically (only when face IS recognized)
                 if recognizer is not None:
                     body_detector.update_ref(gray)
 
@@ -238,17 +247,31 @@ def main() -> None:
                     intruder_streak = 0
 
                     if recognizer is not None and body_detector.present(gray):
-                        # Same body still in the chair — assume it's the owner
-                        if not _body_detect_active:
-                            log("No face — but body still present (assuming owner)")
-                            _body_detect_active = True
-                        if absence_start is not None:
+                        # Body still in chair — but require periodic face re-verification
+                        body_only_duration = now - last_face_time
+
+                        if body_only_duration > max_body_only:
+                            # Too long without face — lock for security
+                            if args.no_lock:
+                                log(f">>> [DRY-RUN] Would lock NOW (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
+                            else:
+                                log(f">>> LOCKING (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
+                                lock_screen(keep_awake_mgr)
+                            locked_until = now + args.cooldown
                             absence_start = None
-                        if keep_awake_mgr and not was_awake:
-                            keep_awake_mgr.enable()
-                            was_awake = True
-                        # Update body reference so we track the current posture
-                        body_detector.update_ref(gray)
+                            _body_detect_active = False
+                            log(f"Cooldown {args.cooldown}s...")
+                        else:
+                            if not _body_detect_active:
+                                log(f"No face — body present, re-verify in {max_body_only - body_only_duration:.0f}s")
+                                _body_detect_active = True
+                            if absence_start is not None:
+                                absence_start = None
+                            if keep_awake_mgr and not was_awake:
+                                keep_awake_mgr.enable()
+                                was_awake = True
+                            # NOTE: body reference is NOT updated here — only when face IS recognized
+                            # This prevents an attacker's body from becoming the new reference
                     else:
                         if _body_detect_active:
                             log("Body no longer detected")
