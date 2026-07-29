@@ -16,15 +16,20 @@ Tips:
 """
 
 import argparse
-import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from face_utils import (
+    Logger,
+    detect_faces,
+    estimate_angle,
+    load_cascades,
+    open_camera,
+)
 
 # ── Defaults ───────────────────────────────────────────────────────
 SAMPLES = 30
@@ -32,65 +37,6 @@ CAMERA_INDEX = 0
 FRAME_WIDTH = 640
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = str(SCRIPT_DIR / "face_model.yml")
-
-# Multi-angle cascades
-_CASCADE_DIR = cv2.data.haarcascades
-CASCADE_PATHS = [
-    _CASCADE_DIR + "haarcascade_frontalface_default.xml",
-    _CASCADE_DIR + "haarcascade_profileface.xml",
-]
-
-# ────────────────────────────────────────────────────────────────────
-
-
-def log(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-
-def load_cascades() -> list:
-    """Load all available Haar cascades."""
-    cascades = []
-    for path in CASCADE_PATHS:
-        if os.path.exists(path):
-            c = cv2.CascadeClassifier(path)
-            if not c.empty():
-                cascades.append((path.split("/")[-1].replace(".xml", ""), c))
-    return cascades
-
-
-def detect_any_face(cascades: list, gray: np.ndarray) -> list:
-    """Detect faces using all cascades (including mirrored for right profile)."""
-    h, w = gray.shape
-    all_faces = []
-    for _name, cascade in cascades:
-        # Normal detection
-        faces = cascade.detectMultiScale(gray, 1.03, 2, minSize=(60, 60))
-        all_faces.extend(faces)
-        # Mirrored for right profile
-        gray_flipped = cv2.flip(gray, 1)
-        faces_flipped = cascade.detectMultiScale(gray_flipped, 1.03, 2, minSize=(60, 60))
-        for (fx, fy, fw, fh) in faces_flipped:
-            all_faces.append((w - fx - fw, fy, fw, fh))
-    if len(all_faces) <= 1:
-        return all_faces
-    # Dedup
-    faces = sorted(all_faces, key=lambda r: r[2] * r[3], reverse=True)
-    kept = []
-    for rect in faces:
-        x, y, w, h = rect
-        overlap = False
-        for kx, ky, kw, kh in kept:
-            xi = max(x, kx)
-            yi = max(y, ky)
-            wi = min(x + w, kx + kw) - xi
-            hi = min(y + h, ky + kh) - yi
-            if wi > 0 and hi > 0 and (wi * hi) > (w * h) * 0.5:
-                overlap = True
-                break
-        if not overlap:
-            kept.append(rect)
-    return kept
 
 
 def main() -> None:
@@ -109,27 +55,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    log = Logger()
+
     # ── Load cascades ──
-    cascades = load_cascades()
-    if not cascades:
-        log("ERROR: no Haar cascades available")
-        sys.exit(1)
-    log(f"Loaded {len(cascades)} cascade(s): {', '.join(n for n, _ in cascades)}")
+    cascades = load_cascades(log)
+    log(f"Loaded {len(cascades)} cascade(s)")
 
     # ── Webcam ──
-    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_V4L2
-    cap = cv2.VideoCapture(args.camera, backend)
-    if not cap.isOpened():
-        log(f"ERROR: camera {args.camera} not available")
+    try:
+        cap = open_camera(args.camera, FRAME_WIDTH)
+    except RuntimeError as exc:
+        log(f"ERROR: {exc}")
         sys.exit(1)
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(FRAME_WIDTH * 0.75))
-
-    # Warmup
-    for _ in range(10):
-        cap.read()
-        time.sleep(0.1)
 
     log(f"Enrolling: {args.samples} samples needed")
     log("Move your head through all angles:")
@@ -147,7 +84,7 @@ def main() -> None:
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = detect_any_face(cascades, gray)
+        faces = detect_faces(cascades, frame, scale_factor=1.03, min_neighbors=2, min_size=(60, 60))
 
         if len(faces) == 1:
             x, y, w, h = faces[0]
@@ -159,15 +96,7 @@ def main() -> None:
 
             bar = "#" * (count * 30 // args.samples)
             blank = " " * (30 - len(bar))
-            # Show which angle was detected (estimate from face position)
-            frame_w = frame.shape[1]
-            rel_x = (x + w / 2) / frame_w
-            if rel_x < 0.35:
-                angle = "LEFT"
-            elif rel_x > 0.65:
-                angle = "RIGHT"
-            else:
-                angle = "FRONT"
+            angle = estimate_angle(x, w, frame.shape[1])
             print(f"\r  [{bar}{blank}] {count}/{args.samples} ({angle})", end="", flush=True)
 
         elif len(faces) > 1 and multi_warn % 15 == 0:

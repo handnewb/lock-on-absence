@@ -198,6 +198,8 @@ python lock-on-absence.py [OPTIONS]
 | `--no-keep-awake` | off | Disable keep-awake (allow normal sleep/lock) |
 | `--check-interval SECONDS` | `1.5` | Time between detection frames |
 | `--model PATH` | `./face_model.yml` | Path to trained LBPH model |
+| `--cooldown SECONDS` | `30` | Silence period after locking before monitoring resumes |
+| `--log-file PATH` | off | Also write timestamped log to a file |
 
 ### `enroll.py`
 
@@ -374,7 +376,20 @@ python lock-on-absence.py --check-interval 3
 
 ## Changelog
 
-### v2.4 — Body Presence Detection (current)
+### v3.0 — Refactor + Keep-Awake Fix + Auto-Calibration (current)
+- **New:** `face_utils.py` — shared module (face detection, body detection, camera, logging)
+- **Fixed:** Linux keep-awake now uses a persistent `systemd-inhibit` subprocess (was broken — `true` exited immediately)
+- **Fixed:** macOS keep-awake via `caffeinate` subprocess
+- **New:** Body detection auto-calibration — adapts threshold to camera/lighting
+- **New:** `--cooldown` flag (was hardcoded 30s)
+- **New:** `--log-file` flag for persistent logging
+- **New:** `KeepAwake` class, `BodyDetector` class, `Logger` class
+- **New:** Signal handlers (SIGINT/SIGTERM) for graceful shutdown
+- **New:** Camera backend fallback (V4L2 → default on Linux)
+- **Improved:** `enroll.py` uses shared `face_utils` module
+- **Reduced:** 342 lines of duplicated code eliminated
+
+### v2.4 — Body Presence Detection
 - Layer 3: frame differencing detects when the owner's body is still in the chair
 - Reference frame captured when owner's face is recognized, refreshed every 30s
 - Mean absdiff < 18 at 160×120 → body present → unlocked

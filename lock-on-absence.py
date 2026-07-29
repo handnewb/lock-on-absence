@@ -3,9 +3,12 @@
 Lock on Absence — Auto-lock your screen when you walk away.
 
 Features:
-  - Multi-angle face detection (frontal + profile)
+  - Multi-angle face detection (frontal + left/right profile)
   - Optional facial recognition (only YOU prevent the lock)
+  - Body presence detection (stays unlocked when you turn away)
+  - Intruder detection (instant lock if someone else sits down)
   - Keep-awake mode (prevents sleep/lock while you're present)
+  - Auto-calibrating body detection threshold
 
 Setup:
   1. pip install -r requirements.txt
@@ -16,30 +19,24 @@ Works on Windows, Linux, and macOS.
 """
 
 import argparse
-import ctypes
 import os
-import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-
-# ── Constants ──────────────────────────────────────────────────────
-# Windows API for keep-awake
-if sys.platform == "win32":
-    _ES_CONTINUOUS = 0x80000000
-    _ES_DISPLAY_REQUIRED = 0x00000002
-    _ES_SYSTEM_REQUIRED = 0x00000001
-    _SetThreadExecutionState = ctypes.windll.kernel32.SetThreadExecutionState
-    _SetThreadExecutionState.argtypes = [ctypes.c_ulong]
-    _SetThreadExecutionState.restype = ctypes.c_ulong
-else:
-    _ES_CONTINUOUS = _ES_DISPLAY_REQUIRED = _ES_SYSTEM_REQUIRED = 0
-    _SetThreadExecutionState = None
+from face_utils import (
+    BodyDetector,
+    KeepAwake,
+    Logger,
+    detect_faces,
+    install_signal_handlers,
+    load_cascades,
+    lock_screen,
+    open_camera,
+)
 
 # ── Defaults (tunable via CLI) ─────────────────────────────────────
 CHECK_INTERVAL = 1.5
@@ -51,197 +48,15 @@ MIN_FACE_SIZE = (30, 30)    # detects faces up to ~1.5m away
 FRAME_WIDTH = 640
 POST_LOCK_COOLDOWN = 30
 RECOGNITION_THRESHOLD = 85  # more tolerant (lower = stricter)
-BODY_DIFF_THRESHOLD = 18    # absdiff mean below this = same body still there
-BODY_REF_INTERVAL = 30      # seconds between reference frame updates
 
 # Paths
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL = str(SCRIPT_DIR / "face_model.yml")
 
-# Multi-angle cascades (OpenCV built-in)
-_CASCADE_DIR = cv2.data.haarcascades
-CASCADE_PATHS = [
-    _CASCADE_DIR + "haarcascade_frontalface_default.xml",   # front
-    _CASCADE_DIR + "haarcascade_profileface.xml",            # side profile
-]
-
-# ────────────────────────────────────────────────────────────────────
-
-
-def log(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-
-# ── System control ─────────────────────────────────────────────────
-
-def keep_awake() -> bool:
-    """Prevent the system from sleeping/locking the display."""
-    if sys.platform == "win32" and _SetThreadExecutionState:
-        _SetThreadExecutionState(
-            _ES_CONTINUOUS | _ES_DISPLAY_REQUIRED | _ES_SYSTEM_REQUIRED
-        )
-        return True
-    # Linux: use systemd-inhibit if available, otherwise xdg-screensaver
-    try:
-        subprocess.run(
-            ["systemd-inhibit", "--what=idle:sleep", "--why=Lock on Absence",
-             "--who=lock-on-absence", "true"],
-            timeout=1, check=False,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        return True
-    except Exception:
-        pass
-    try:
-        subprocess.run(
-            ["xdg-screensaver", "reset"],
-            timeout=1, check=False,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        return True
-    except Exception:
-        return False
-
-
-def allow_sleep() -> None:
-    """Allow the system to sleep/lock normally again."""
-    if sys.platform == "win32" and _SetThreadExecutionState:
-        _SetThreadExecutionState(_ES_CONTINUOUS)
-
-
-def lock_screen() -> bool:
-    """Lock the workstation. Returns True on success."""
-    if sys.platform == "win32":
-        # Release keep-awake before locking so the lock sticks
-        allow_sleep()
-        ctypes.windll.user32.LockWorkStation()
-        return True
-
-    for args in (
-        ["loginctl", "lock-session"],
-        ["xdg-screensaver", "lock"],
-        ["gnome-screensaver-command", "--lock"],
-        ["dm-tool", "lock"],
-        ["i3lock", "-n"],
-        ["slock"],
-        ["osascript", "-e", 'tell application "System Events" to sleep'],
-    ):
-        try:
-            subprocess.run(
-                args, timeout=5, check=False,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            return True
-        except Exception:
-            continue
-    return False
-
-
-# ── Face detection ─────────────────────────────────────────────────
-
-def load_cascades() -> list[cv2.CascadeClassifier]:
-    """Load all available Haar cascades (frontal + profile)."""
-    cascades = []
-    for path in CASCADE_PATHS:
-        if os.path.exists(path):
-            c = cv2.CascadeClassifier(path)
-            if not c.empty():
-                cascades.append(c)
-    if not cascades:
-        log("ERROR: no Haar cascades available")
-        sys.exit(1)
-    return cascades
-
-
-def detect_faces_all(cascades: list, frame: np.ndarray) -> list:
-    """
-    Detect faces using ALL cascades (frontal + left profile + right profile).
-    Right profile is detected by mirroring the frame.
-    Returns deduplicated list of rectangles [(x, y, w, h), ...].
-    """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    h, w = gray.shape
-    all_faces = []
-
-    for cascade in cascades:
-        # Normal detection (frontal + left profile)
-        faces = cascade.detectMultiScale(
-            gray,
-            scaleFactor=SCALE_FACTOR,
-            minNeighbors=MIN_NEIGHBORS,
-            minSize=MIN_FACE_SIZE,
-        )
-        all_faces.extend(faces)
-
-        # Mirror detection for right profile (only the profile cascade benefits)
-        gray_flipped = cv2.flip(gray, 1)
-        faces_flipped = cascade.detectMultiScale(
-            gray_flipped,
-            scaleFactor=SCALE_FACTOR,
-            minNeighbors=MIN_NEIGHBORS,
-            minSize=MIN_FACE_SIZE,
-        )
-        # Un-flip coordinates: x' = width - x - rect_width
-        for (fx, fy, fw, fh) in faces_flipped:
-            all_faces.append((w - fx - fw, fy, fw, fh))
-
-    if len(all_faces) <= 1:
-        return all_faces
-    return _dedup_faces(all_faces)
-
-
-def _dedup_faces(faces: list) -> list:
-    """Remove duplicate/overlapping face rectangles."""
-    if not faces:
-        return []
-    # Sort by area descending
-    faces = sorted(faces, key=lambda r: r[2] * r[3], reverse=True)
-    kept = []
-    for rect in faces:
-        x, y, w, h = rect
-        overlap = False
-        for kx, ky, kw, kh in kept:
-            # Check intersection over area
-            xi = max(x, kx)
-            yi = max(y, ky)
-            wi = min(x + w, kx + kw) - xi
-            hi = min(y + h, ky + kh) - yi
-            if wi > 0 and hi > 0:
-                inter = wi * hi
-                area = w * h
-                if inter > area * 0.5:
-                    overlap = True
-                    break
-        if not overlap:
-            kept.append(rect)
-    return kept
-
-
-# ── Body detection (presence without face) ─────────────────────────
-
-def body_present(ref_frame: np.ndarray | None, current_frame: np.ndarray) -> bool:
-    """
-    Compare current frame with reference to check if the body is still there.
-    Uses mean absolute difference on a downscaled grayscale image.
-    Returns True if the scene hasn't changed significantly.
-    """
-    if ref_frame is None:
-        return False
-    try:
-        # Downscale to 160x120 for speed and to ignore small movements
-        small_ref = cv2.resize(ref_frame, (160, 120))
-        small_cur = cv2.resize(current_frame, (160, 120))
-        diff = cv2.absdiff(small_ref, small_cur)
-        mean_diff = float(np.mean(diff))
-        return mean_diff < BODY_DIFF_THRESHOLD
-    except Exception:
-        return False
-
 
 # ── Recognition ────────────────────────────────────────────────────
 
-def recognize_face(
+def recognize_owner(
     recognizer: cv2.face.LBPHFaceRecognizer,
     gray_frame: np.ndarray,
     face_rect: tuple,
@@ -256,7 +71,7 @@ def recognize_face(
     return confidence < RECOGNITION_THRESHOLD, confidence
 
 
-# ── CLI ────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -286,17 +101,30 @@ def main() -> None:
         "--no-keep-awake", action="store_true",
         help="Disable keep-awake (allow normal sleep/lock behavior even when owner present)",
     )
+    parser.add_argument(
+        "--cooldown", type=int, default=POST_LOCK_COOLDOWN,
+        help=f"Seconds of silence after locking (default: {POST_LOCK_COOLDOWN})",
+    )
+    parser.add_argument(
+        "--log-file", type=str, default=None,
+        help="Also write log output to a file",
+    )
     args = parser.parse_args()
 
+    # ── Logger ──
+    log = Logger(args.log_file)
+
     # ── Load cascades (frontal + profile) ──
-    cascades = load_cascades()
+    cascades = load_cascades(log)
     log(f"Loaded {len(cascades)} Haar cascade(s)")
 
     # ── Recognition model (optional) ──
-    recognizer = None
+    recognizer = None  # type: cv2.face.LBPHFaceRecognizer | None
+    body_detector = BodyDetector()
     if os.path.exists(args.model):
-        recognizer = cv2.face.LBPHFaceRecognizer_create()
-        recognizer.read(args.model)
+        rec = cv2.face.LBPHFaceRecognizer_create()
+        rec.read(args.model)
+        recognizer = rec
         log(f"Face model loaded: {args.model}")
         log("Mode: OWNER RECOGNITION (only your face prevents lock)")
     else:
@@ -304,34 +132,36 @@ def main() -> None:
         log("Mode: ANY FACE (any face prevents lock)")
 
     # ── Webcam ──
-    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_V4L2
-    cap = cv2.VideoCapture(args.camera, backend)
-    if not cap.isOpened():
-        log(f"ERROR: camera {args.camera} not available")
+    try:
+        cap = open_camera(args.camera, FRAME_WIDTH)
+    except RuntimeError as exc:
+        log(f"ERROR: {exc}")
         sys.exit(1)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(FRAME_WIDTH * 0.75))
+    # ── Keep-awake ──
+    keep_awake_mgr = KeepAwake(log)
+    if args.no_keep_awake:
+        log("Keep-awake: DISABLED")
+        keep_awake_mgr = None  # type: ignore[assignment]
 
-    # Warmup
-    for _ in range(8):
-        cap.read()
-        time.sleep(0.1)
+    # ── Graceful shutdown ──
+    install_signal_handlers(cap, keep_awake_mgr or KeepAwake(), log)
 
     # ── Status ──
-    keep_awake_enabled = not args.no_keep_awake
     lock_label = "DRY-RUN" if args.no_lock else "ACTIVE LOCK"
-    awake_label = "keep-awake ON" if keep_awake_enabled else "keep-awake OFF"
-    body_label = "body-detect ON" if recognizer else "body-detect OFF"
-    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  [{lock_label}]  [{awake_label}]  [{body_label}]")
+    awake_label = "keep-awake ON" if keep_awake_mgr else "keep-awake OFF"
+    body_label = f"body-detect ON ({body_detector.status})" if recognizer else "body-detect OFF"
+    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  cooldown={args.cooldown}s  [{lock_label}]  [{awake_label}]  [{body_label}]")
     log("Press Ctrl+C to stop")
 
+    # ── State machine ──
     absence_start: float | None = None
-    locked = False
+    locked_until: float = 0.0
     was_awake = False
     intruder_streak = 0
-    body_ref_frame: np.ndarray | None = None
-    last_body_ref_time = 0.0
+
+    # Track body-detect status for one-time log messages
+    _body_detect_active = False
 
     try:
         while True:
@@ -341,46 +171,55 @@ def main() -> None:
                 continue
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = detect_faces_all(cascades, frame)
+            faces = detect_faces(cascades, frame, SCALE_FACTOR, MIN_NEIGHBORS, MIN_FACE_SIZE)
             owner_present = False
+            now = time.time()
 
+            # ── Face detection ──
             if len(faces) == 0:
                 owner_present = False
             elif recognizer is not None:
                 for rect in faces:
-                    is_owner, _conf = recognize_face(recognizer, gray, rect)
+                    is_owner, _conf = recognize_owner(recognizer, gray, rect)
                     if is_owner:
                         owner_present = True
                         break
             else:
                 owner_present = True  # any face = owner
 
+            # ── Cooldown after lock ──
+            if locked_until and now < locked_until:
+                time.sleep(args.check_interval)
+                continue
+
+            # ── Owner present ──
             if owner_present:
                 intruder_streak = 0
-                if keep_awake_enabled and not was_awake:
-                    keep_awake()
+                if _body_detect_active:
+                    log("Owner face detected — body-detect disengaged")
+                    _body_detect_active = False
+
+                if keep_awake_mgr and not was_awake:
+                    keep_awake_mgr.enable()
                     was_awake = True
 
                 # Update body reference frame periodically
-                now = time.time()
-                if now - last_body_ref_time >= BODY_REF_INTERVAL:
-                    body_ref_frame = gray.copy()
-                    last_body_ref_time = now
+                if recognizer is not None:
+                    body_detector.update_ref(gray)
 
                 if absence_start is not None:
                     log("Owner detected — timer reset")
                 absence_start = None
-                locked = False
+                locked_until = 0.0
+
+            # ── Owner NOT present ──
             else:
                 if was_awake:
-                    allow_sleep()
+                    if keep_awake_mgr:
+                        keep_awake_mgr.disable()
                     was_awake = False
 
-                if locked:
-                    time.sleep(args.check_interval)
-                    continue
-
-                # Face detected but NOT owner -> increment streak
+                # Face detected but NOT owner → intruder check
                 if len(faces) > 0 and recognizer is not None:
                     intruder_streak += 1
                     if intruder_streak >= 2:
@@ -388,45 +227,55 @@ def main() -> None:
                             log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
                         else:
                             log(">>> LOCKING NOW (intruder confirmed)")
-                            lock_screen()
-                            locked = True
-                            intruder_streak = 0
-                            log(f"Cooldown {POST_LOCK_COOLDOWN}s...")
+                            lock_screen(keep_awake_mgr)
+                        locked_until = now + args.cooldown
+                        intruder_streak = 0
                         absence_start = None
-                    # else: first unconfirmed sighting, wait one more frame
+                        _body_detect_active = False
+                        log(f"Cooldown {args.cooldown}s...")
                 else:
-                    # No face at all — check if body is still there
+                    # No face at all — check body presence
                     intruder_streak = 0
 
-                    if body_present(body_ref_frame, gray):
+                    if recognizer is not None and body_detector.present(gray):
                         # Same body still in the chair — assume it's the owner
+                        if not _body_detect_active:
+                            log("No face — but body still present (assuming owner)")
+                            _body_detect_active = True
                         if absence_start is not None:
-                            log("Body still present — assuming owner (timer reset)")
-                        absence_start = None
-                        if keep_awake_enabled and not was_awake:
-                            keep_awake()
+                            absence_start = None
+                        if keep_awake_mgr and not was_awake:
+                            keep_awake_mgr.enable()
                             was_awake = True
+                        # Update body reference so we track the current posture
+                        body_detector.update_ref(gray)
                     else:
+                        if _body_detect_active:
+                            log("Body no longer detected")
+                            _body_detect_active = False
+
                         if absence_start is None:
-                            absence_start = time.time()
+                            absence_start = now
                             log(f"No face — waiting {args.delay}s...")
-                        elif time.time() - absence_start >= args.delay:
+                        elif now - absence_start >= args.delay:
                             if args.no_lock:
                                 log(">>> [DRY-RUN] Would lock now (nobody present)")
                             else:
                                 log(">>> LOCKING (nobody present)")
-                                lock_screen()
-                                locked = True
-                                log(f"Cooldown {POST_LOCK_COOLDOWN}s...")
+                                lock_screen(keep_awake_mgr)
+                            locked_until = now + args.cooldown
                             absence_start = None
+                            log(f"Cooldown {args.cooldown}s...")
 
             time.sleep(args.check_interval)
 
     except KeyboardInterrupt:
         log("Stopped by user")
     finally:
-        allow_sleep()
+        if keep_awake_mgr:
+            keep_awake_mgr.disable()
         cap.release()
+        log("Cleanup complete")
 
 
 if __name__ == "__main__":
