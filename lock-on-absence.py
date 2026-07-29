@@ -23,6 +23,8 @@ import json
 import os
 import sys
 import time
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -431,6 +433,16 @@ def main() -> None:
 
     except KeyboardInterrupt:
         log("Stopped by user")
+    except Exception as exc:
+        log(f"CRASH: {exc}")
+        event_log.camera_error(str(exc))
+        if args.log_file:
+            try:
+                with open(args.log_file, "a") as f:
+                    f.write(f"[CRASH] {datetime.now().strftime('%H:%M:%S')}\n")
+                    traceback.print_exc(file=f)
+            except OSError:
+                pass
     finally:
         if keep_awake_mgr:
             keep_awake_mgr.disable()
