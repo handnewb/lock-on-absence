@@ -30,11 +30,16 @@ import numpy as np
 
 from face_utils import (
     BodyDetector,
+    EventLogger,
     KeepAwake,
     Logger,
     StealthCamera,
+    YUNetDetector,
     camera_available,
+    create_detector,
     detect_faces,
+    detect_faces_dnn,
+    download_yunet,
     install_signal_handlers,
     load_cascades,
     lock_screen,
@@ -129,14 +134,36 @@ def main() -> None:
         "--anti-spoof-timeout", type=int, default=15,
         help="Max seconds face can be perfectly still before locking as potential photo attack (default: 15, 0=disable)",
     )
+    parser.add_argument(
+        "--event-log", action="store_true",
+        help="Write security events to Windows Event Log / Linux syslog",
+    )
+    parser.add_argument(
+        "--yunet", action="store_true",
+        help="Use YuNet DNN face detector (downloads model if needed, much better than Haar)",
+    )
     args = parser.parse_args()
 
-    # ── Logger ──
+    # ── Logger + Event log ──
     log = Logger(args.log_file)
+    event_log = EventLogger(args.event_log)
+    if args.event_log:
+        log(f"Event log: {'Windows Event Log' if sys.platform == 'win32' else 'syslog'} enabled")
 
-    # ── Load cascades (frontal + profile) ──
-    cascades = load_cascades(log)
-    log(f"Loaded {len(cascades)} Haar cascade(s)")
+    # ── Detector (YuNet or Haar) ──
+    if args.yunet:
+        try:
+            yunet_path = download_yunet(str(SCRIPT_DIR))
+            detector, detector_type = YUNetDetector(yunet_path), "yunet"
+            log(f"Detector: YuNet DNN ({yunet_path})")
+        except Exception as e:
+            log(f"WARNING: YuNet download failed ({e}), falling back to Haar")
+            detector, detector_type = load_cascades(log), "haar"
+    else:
+        detector, detector_type = load_cascades(log), "haar"
+    if detector_type == "haar":
+        log(f"Loaded {len(detector)} Haar cascade(s)")
+    cascades = detector  # legacy alias for Haar path
 
     # ── Recognition model (optional) ──
     recognizer = None  # type: cv2.face.LBPHFaceRecognizer | None
@@ -193,7 +220,9 @@ def main() -> None:
     body_label = f"body-detect ON ({body_detector.status})" if recognizer else "body-detect OFF"
     max_body_label = f"max-body-only={args.max_body_only}s" if recognizer else ""
     stealth_label = " [STEALTH]" if args.stealth else ""
-    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  cooldown={args.cooldown}s  {max_body_label}  [{lock_label}]  [{awake_label}]  [{body_label}]{stealth_label}")
+    yunet_label = " [YuNet]" if detector_type == "yunet" else ""
+    event_label = " [EventLog]" if args.event_log else ""
+    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  cooldown={args.cooldown}s  {max_body_label}  [{lock_label}]  [{awake_label}]  [{body_label}]{stealth_label}{yunet_label}{event_label}")
     if args.stealth:
         log("LED: camera opens/closes per frame (~200ms blink instead of solid)")
     log("Press Ctrl+C to stop")
@@ -247,7 +276,11 @@ def main() -> None:
                     camera_busy_until = 0.0
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = detect_faces(cascades, frame, SCALE_FACTOR, MIN_NEIGHBORS, MIN_FACE_SIZE)
+            # Detect faces with current detector (YuNet or Haar)
+            if detector_type == "yunet":
+                faces = detect_faces_dnn(detector, frame)
+            else:
+                faces = detect_faces(detector, frame, SCALE_FACTOR, MIN_NEIGHBORS, MIN_FACE_SIZE)
             owner_present = False
 
             # ── Face detection ──
@@ -296,6 +329,7 @@ def main() -> None:
                                 else:
                                     log(f">>> LOCKING (anti-spoof: face static for {now - static_since:.0f}s — possible photo)")
                                     lock_screen(keep_awake_mgr)
+                                event_log.spoof_lock(now - static_since) if not args.no_lock else None
                                 locked_until = now + args.cooldown
                                 static_since = None
                                 absence_start = None
@@ -337,6 +371,7 @@ def main() -> None:
                         else:
                             log(">>> LOCKING NOW (intruder confirmed)")
                             lock_screen(keep_awake_mgr)
+                        event_log.intruder_lock() if not args.no_lock else None
                         locked_until = now + args.cooldown
                         intruder_streak = 0
                         absence_start = None
@@ -357,6 +392,7 @@ def main() -> None:
                             else:
                                 log(f">>> LOCKING (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
                                 lock_screen(keep_awake_mgr)
+                            event_log.body_timeout_lock(body_only_duration) if not args.no_lock else None
                             locked_until = now + args.cooldown
                             absence_start = None
                             _body_detect_active = False
@@ -386,6 +422,7 @@ def main() -> None:
                             else:
                                 log(">>> LOCKING (nobody present)")
                                 lock_screen(keep_awake_mgr)
+                            event_log.absence_lock(now - absence_start) if not args.no_lock and absence_start else None
                             locked_until = now + args.cooldown
                             absence_start = None
                             log(f"Cooldown {args.cooldown}s...")

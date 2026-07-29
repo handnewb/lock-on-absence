@@ -297,6 +297,150 @@ class StealthCamera:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  YuNet DNN face detector (modern, replaces Haar when available)
+# ═══════════════════════════════════════════════════════════════════════
+
+YUNET_MODEL = "face_detection_yunet_2023mar.onnx"
+YUNET_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/"
+    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+YUNET_INPUT_SIZE = (320, 320)
+YUNET_SCORE_THRESHOLD = 0.6
+YUNET_NMS_THRESHOLD = 0.3
+
+
+class YUNetDetector:
+    """DNN-based face detector (YuNet). Much better than Haar at angles and lighting."""
+
+    def __init__(self, model_path: str = YUNET_MODEL):
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"YuNet model not found: {model_path}")
+        self.detector = cv2.FaceDetectorYN.create(
+            model_path, "", YUNET_INPUT_SIZE,
+            YUNET_SCORE_THRESHOLD, YUNET_NMS_THRESHOLD, 5000,
+        )
+
+    def detect(self, frame: np.ndarray) -> list:
+        """Detect faces. Returns [(x, y, w, h), ...] in pixel coordinates."""
+        h, w = frame.shape[:2]
+        self.detector.setInputSize((w, h))
+        _conf, faces = self.detector.detect(frame)
+        if faces is None:
+            return []
+        # YuNet returns [x, y, w, h, ...landmarks] — keep only first 4
+        return [(int(f[0]), int(f[1]), int(f[2]), int(f[3])) for f in faces]
+
+
+def download_yunet(target_dir: str = ".") -> str:
+    """Download YuNet ONNX model. Returns path on success, raises on failure."""
+    import urllib.request
+
+    dest = os.path.join(target_dir, YUNET_MODEL)
+    if os.path.exists(dest):
+        return dest
+    print(f"Downloading YuNet model ({YUNET_MODEL})...", flush=True)
+    urllib.request.urlretrieve(YUNET_URL, dest)
+    print(f"Saved to {dest}", flush=True)
+    return dest
+
+
+def create_detector(model_dir: str = ".", prefer_yunet: bool = True) -> tuple:
+    """
+    Factory: returns (detector, type, extra_info).
+    Tries YuNet first, falls back to Haar cascades.
+    """
+    if prefer_yunet:
+        model_path = os.path.join(model_dir, YUNET_MODEL)
+        if os.path.exists(model_path):
+            try:
+                return YUNetDetector(model_path), "yunet", {}
+            except Exception:
+                pass
+
+    # Fallback: Haar cascades
+    cascades = []
+    for path in CASCADE_PATHS:
+        if os.path.exists(path):
+            c = cv2.CascadeClassifier(path)
+            if not c.empty():
+                cascades.append(c)
+    if not cascades:
+        raise RuntimeError("No face detector available")
+    return cascades, "haar", {}
+
+
+def detect_faces_dnn(detector: YUNetDetector, frame: np.ndarray) -> list:
+    """Detect faces with YuNet. Simple wrapper returning [(x,y,w,h), ...]."""
+    return detector.detect(frame)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Windows Event Log / Syslog integration
+# ═══════════════════════════════════════════════════════════════════════
+
+def _eventlog_windows(event_id: int, message: str, level: str = "WARNING") -> None:
+    """Write to Windows Event Log via eventcreate.exe. No extra dependencies."""
+    level_map = {"INFO": "INFORMATION", "WARN": "WARNING", "ERROR": "ERROR"}
+    try:
+        subprocess.run(
+            ["eventcreate", "/ID", str(event_id), "/L", "APPLICATION",
+             "/T", level_map.get(level, "WARNING"), "/SO", "LockOnAbsence",
+             "/D", message],
+            timeout=3, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def _eventlog_linux(message: str, level: str = "WARNING") -> None:
+    """Write to syslog via logger command."""
+    try:
+        subprocess.run(
+            ["logger", "-t", "lock-on-absence", "-p", f"user.{level.lower()}", message],
+            timeout=3, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+class EventLogger:
+    """Writes security events to OS event log + file log."""
+
+    # Event IDs
+    LOCK_INTRUDER = 1001
+    LOCK_ABSENCE = 1002
+    LOCK_SPOOF = 1003
+    LOCK_BODY_TIMEOUT = 1004
+    ERROR_CAMERA = 2001
+
+    def __init__(self, enabled: bool = False):
+        self.enabled = enabled and sys.platform in ("win32", "linux")
+
+    def _emit(self, event_id: int, message: str, level: str = "WARNING") -> None:
+        if not self.enabled:
+            return
+        if sys.platform == "win32":
+            _eventlog_windows(event_id, message, level)
+        else:
+            _eventlog_linux(message, level)
+
+    def intruder_lock(self) -> None:
+        self._emit(self.LOCK_INTRUDER, "Screen locked: intruder detected (non-owner face)", "WARN")
+
+    def absence_lock(self, seconds: float) -> None:
+        self._emit(self.LOCK_ABSENCE, f"Screen locked: owner absent for {seconds:.0f}s", "INFO")
+
+    def spoof_lock(self, seconds: float) -> None:
+        self._emit(self.LOCK_SPOOF, f"Screen locked: possible photo attack (static face {seconds:.0f}s)", "WARN")
+
+    def body_timeout_lock(self, seconds: float) -> None:
+        self._emit(self.LOCK_BODY_TIMEOUT, f"Screen locked: body-only timeout ({seconds:.0f}s without face)", "WARN")
+
+    def camera_error(self, detail: str) -> None:
+        self._emit(self.ERROR_CAMERA, f"Camera error: {detail}", "ERROR")
 #  Keep-awake (Windows + Linux)
 # ═══════════════════════════════════════════════════════════════════════
 

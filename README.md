@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/handnewb/lock-on-absence)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-3.4-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
+[![Version](https://img.shields.io/badge/version-3.5-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
 
 ---
 
@@ -209,6 +209,8 @@ python lock-on-absence.py [OPTIONS]
 | `--stealth` | off | Open/close camera per frame — minimizes LED glow |
 | `--meeting-pause SECONDS` | `30` | Pause monitoring when camera is in use by another app |
 | `--anti-spoof-timeout SECONDS` | `15` | Max time face can be perfectly still before locking (0=disable) |
+| `--yunet` | off | Use YuNet DNN face detector (auto-downloads model, better at angles/light) |
+| `--event-log` | off | Write security events to Windows Event Log / Linux syslog |
 
 ### `enroll.py`
 
@@ -385,7 +387,16 @@ python lock-on-absence.py --check-interval 3
 
 ## Changelog
 
-### v3.4 — Anti-Spoofing: Movement Verification (current)
+### v3.5 — YuNet DNN Detector + Corporate Event Logging (current)
+- **New:** `--yunet` flag — uses YuNet DNN face detector instead of Haar cascades. Auto-downloads the ONNX model from OpenCV Zoo. Much better at angles, lighting, and small faces
+- **New:** `--event-log` flag — writes security events to Windows Event Log (eventcreate) or Linux syslog (logger). No extra dependencies
+- **New:** `YUNetDetector` class — wraps `cv2.FaceDetectorYN` with the 2023mar model
+- **New:** `EventLogger` class — emits structured events by type: intruder (1001), absence (1002), spoof (1003), body-timeout (1004), camera-error (2001)
+- **New:** `download_yunet()` helper — fetches model from GitHub, skips if already present
+- **New:** `create_detector()` factory — auto-selects YuNet if model exists, falls back to Haar
+- Status bar now shows `[YuNet]` and `[EventLog]` when active
+
+### v3.4 — Anti-Spoofing: Movement Verification
 - **New:** `--anti-spoof-timeout` flag — detects photo/video attacks by tracking face micro-movements
 - A real person never stays perfectly still (breathing, micro-saccades). A photo is pixel-static
 - Tracks face center point across frames; if position changes < 3px for N seconds → lock
