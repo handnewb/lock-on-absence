@@ -27,10 +27,14 @@ class Logger:
     def __call__(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
-        print(line, flush=True)
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            # Windows terminal may not support some Unicode chars
+            print(line.encode("ascii", errors="replace").decode(), flush=True)
         if self.filepath:
             try:
-                with open(self.filepath, "a") as f:
+                with open(self.filepath, "a", encoding="utf-8") as f:
                     f.write(line + "\n")
             except OSError:
                 pass

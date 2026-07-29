@@ -245,7 +245,7 @@ def main() -> None:
     prev_face_center: tuple[float, float] | None = None
     static_since: float | None = None
     if anti_spoof_timeout > 0 and anti_spoof_timeout != float("inf"):
-        log(f"Anti-spoof: ON (max {anti_spoof_timeout:.0f}s static face → lock)")
+        log(f"Anti-spoof: ON (max {anti_spoof_timeout:.0f}s static face -> lock)")
     elif recognizer:
         log("Anti-spoof: OFF (--anti-spoof-timeout 0)")
 
