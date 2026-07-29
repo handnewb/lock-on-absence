@@ -273,10 +273,12 @@ def main() -> None:
             ret, frame = cap.read()
             if not ret or frame is None:
                 # Camera might be in use by another app (Teams, Zoom, etc.)
-                if not args.stealth and not camera_available(args.camera):
+                if not camera_available(args.camera):
                     if camera_busy_until == 0.0:
                         log(f"Camera in use by another app — pausing {args.meeting_pause}s (meeting mode)")
                     camera_busy_until = now + args.meeting_pause
+                elif args.stealth:
+                    pass  # stealth mode: keep retrying silently
                 if camera_busy_until and now < camera_busy_until:
                     # Still waiting — retry camera
                     if not args.stealth:
