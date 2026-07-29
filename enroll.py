@@ -16,6 +16,7 @@ Tips:
 """
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -134,16 +135,19 @@ def main() -> None:
     log(f"  Calibrated threshold: {calibrated:.0f} (lower = stricter, default was 85)")
 
     # Save threshold alongside model
-    import json
-    meta_path = str(Path(args.output).with_suffix(".json"))
-    with open(meta_path, "w") as f:
-        json.dump({
-            "threshold": round(calibrated, 1),
-            "mean_confidence": round(mean_conf, 1),
-            "std_confidence": round(std_conf, 1),
-            "samples": len(faces_data),
-        }, f, indent=2)
-    log(f"Threshold saved to: {meta_path}")
+    try:
+        meta_path = str(Path(args.output).with_suffix(".json"))
+        with open(meta_path, "w") as f:
+            json.dump({
+                "threshold": round(calibrated, 1),
+                "mean_confidence": round(mean_conf, 1),
+                "std_confidence": round(std_conf, 1),
+                "samples": len(faces_data),
+            }, f, indent=2)
+        log(f"Threshold saved to: {meta_path}")
+    except OSError as e:
+        log(f"WARNING: Could not save threshold metadata: {e}")
+        log("Recognition will use default threshold (85)")
 
     log("")
     log("Enrollment complete! Run: python lock-on-absence.py")

@@ -19,6 +19,7 @@ Works on Windows, Linux, and macOS.
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -143,7 +144,6 @@ def main() -> None:
         recognizer = rec
         log(f"Face model loaded: {args.model}")
         # Try to load calibrated threshold from face_model.json
-        import json
         meta_path = str(Path(args.model).with_suffix(".json"))
         if os.path.exists(meta_path):
             with open(meta_path) as f:
