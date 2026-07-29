@@ -336,6 +336,11 @@ def main() -> None:
                 absence_start = None
                 locked_until = 0.0
 
+                # Heartbeat: confirm alive every 60s
+                if int(now) % 60 == 0 and int(now) != getattr(main, "_last_heartbeat", 0):
+                    log("Heartbeat — owner present, system active")
+                    main._last_heartbeat = int(now)  # type: ignore[attr-defined]
+
                 # Anti-spoof: check face movement (photo/video has zero micro-movement)
                 if owner_rect is not None and anti_spoof_timeout > 0 and anti_spoof_timeout != float("inf"):
                     x, y, w, h = owner_rect
