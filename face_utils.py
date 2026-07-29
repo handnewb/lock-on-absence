@@ -302,6 +302,81 @@ class StealthCamera:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Blink detection (liveness proof — anti-spoofing)
+# ═══════════════════════════════════════════════════════════════════════
+
+_EYE_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_eye.xml"
+# Eye Aspect Ratio: (vertical distances) / (horizontal distance)
+# Drops sharply during blink — typical threshold ~0.2
+
+
+class BlinkDetector:
+    """
+    Detects blinks using eye aspect ratio (EAR).
+    A real person blinks every 2-10 seconds. A photo never blinks.
+    """
+
+    def __init__(self, ear_threshold: float = 0.22, blink_timeout: float = 15.0):
+        self.ear_threshold = ear_threshold
+        self.blink_timeout = blink_timeout
+        self._eye_cascade: cv2.CascadeClassifier | None = None
+        if os.path.exists(_EYE_CASCADE_PATH):
+            c = cv2.CascadeClassifier(_EYE_CASCADE_PATH)
+            if not c.empty():
+                self._eye_cascade = c
+        self._last_blink_time: float = 0.0
+        self._blink_detected: bool = False
+
+    @property
+    def available(self) -> bool:
+        return self._eye_cascade is not None
+
+    def update(self, gray_face_roi: np.ndarray, now: float) -> bool:
+        """
+        Process a face region. Returns True if a blink was just detected.
+        Call this each frame when owner is present.
+        """
+        if not self.available:
+            return False
+        try:
+            eyes = self._eye_cascade.detectMultiScale(gray_face_roi, 1.1, 3, minSize=(15, 10))
+        except Exception:
+            return False
+
+        if len(eyes) < 2:
+            return False  # need both eyes visible
+
+        # Take the best 2 eye candidates (by y-position for alignment)
+        eyes_sorted = sorted(eyes, key=lambda e: e[1])[:2]
+        ears = []
+        for (ex, ey, ew, eh) in eyes_sorted:
+            # Vertical eye landmarks approximation from bounding box
+            ear = eh / max(ew, 1)  # simplified EAR: height/width ratio
+            ears.append(ear)
+
+        # Blink: both eyes narrow (low EAR)
+        if all(e < self.ear_threshold for e in ears):
+            if not self._blink_detected:
+                self._blink_detected = True
+                self._last_blink_time = now
+                return True
+        else:
+            self._blink_detected = False
+
+        return False
+
+    def time_since_blink(self, now: float) -> float:
+        """Seconds since last detected blink."""
+        if self._last_blink_time == 0.0:
+            return float("inf")
+        return now - self._last_blink_time
+
+    def reset(self) -> None:
+        self._last_blink_time = 0.0
+        self._blink_detected = False
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  YuNet DNN face detector (modern, replaces Haar when available)
 # ═══════════════════════════════════════════════════════════════════════
 

@@ -31,6 +31,7 @@ import cv2
 import numpy as np
 
 from face_utils import (
+    BlinkDetector,
     BodyDetector,
     EventLogger,
     KeepAwake,
@@ -258,6 +259,13 @@ def main() -> None:
     elif recognizer:
         log("Anti-spoof: OFF (--anti-spoof-timeout 0)")
 
+    # Blink detection (liveness)
+    blink_detector = BlinkDetector()
+    if blink_detector.available:
+        log("Blink detection: ON (liveness proof)")
+    else:
+        log("Blink detection: unavailable (eye cascade missing)")
+
     try:
         while True:
             now = time.time()
@@ -360,6 +368,15 @@ def main() -> None:
                 if recognizer is not None:
                     body_detector.update_ref(gray)
 
+                # Blink detection: feed face ROI to liveness checker
+                if owner_rect is not None and blink_detector.available:
+                    x, y, w, h = owner_rect
+                    face_roi = gray[max(0, y):min(gray.shape[0], y + h),
+                                    max(0, x):min(gray.shape[1], x + w)]
+                    blinked = blink_detector.update(face_roi, now)
+                    if blinked:
+                        log("Blink detected (liveness confirmed)")
+
                 if absence_start is not None:
                     log("Owner detected — timer reset")
 
@@ -368,6 +385,7 @@ def main() -> None:
                 # Reset anti-spoof tracking when no face is recognized
                 prev_face_center = None
                 static_since = None
+                blink_detector.reset()
 
                 if was_awake:
                     if keep_awake_mgr:
