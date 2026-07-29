@@ -125,6 +125,10 @@ def main() -> None:
         "--meeting-pause", type=int, default=30,
         help="Seconds to pause monitoring when camera is in use by another app (default: 30)",
     )
+    parser.add_argument(
+        "--anti-spoof-timeout", type=int, default=15,
+        help="Max seconds face can be perfectly still before locking as potential photo attack (default: 15, 0=disable)",
+    )
     args = parser.parse_args()
 
     # ── Logger ──
@@ -205,6 +209,15 @@ def main() -> None:
     # Track body-detect status for one-time log messages
     _body_detect_active = False
 
+    # Anti-spoof: track face movement (photo/video attacks)
+    anti_spoof_timeout = float(args.anti_spoof_timeout) if recognizer else float("inf")
+    prev_face_center: tuple[float, float] | None = None
+    static_since: float | None = None
+    if anti_spoof_timeout > 0 and anti_spoof_timeout != float("inf"):
+        log(f"Anti-spoof: ON (max {anti_spoof_timeout:.0f}s static face → lock)")
+    elif recognizer:
+        log("Anti-spoof: OFF (--anti-spoof-timeout 0)")
+
     try:
         while True:
             now = time.time()
@@ -240,14 +253,18 @@ def main() -> None:
             # ── Face detection ──
             if len(faces) == 0:
                 owner_present = False
+                owner_rect = None
             elif recognizer is not None:
+                owner_rect = None
                 for rect in faces:
                     is_owner, _conf = recognize_owner(recognizer, gray, rect, recognition_threshold)
                     if is_owner:
                         owner_present = True
+                        owner_rect = rect
                         break
             else:
                 owner_present = True  # any face = owner
+                owner_rect = faces[0] if faces else None
 
             # ── Cooldown after lock ──
             if locked_until and now < locked_until:
@@ -262,6 +279,30 @@ def main() -> None:
                     _body_detect_active = False
 
                 last_face_time = now  # reset re-verification timer
+
+                # Anti-spoof: check face movement (photo/video has zero micro-movement)
+                if owner_rect is not None and anti_spoof_timeout > 0 and anti_spoof_timeout != float("inf"):
+                    x, y, w, h = owner_rect
+                    cx, cy = x + w / 2.0, y + h / 2.0
+                    if prev_face_center is not None:
+                        dx = abs(cx - prev_face_center[0])
+                        dy = abs(cy - prev_face_center[1])
+                        if dx < 3 and dy < 3:  # essentially static
+                            if static_since is None:
+                                static_since = now
+                            elif now - static_since > anti_spoof_timeout:
+                                if args.no_lock:
+                                    log(f">>> [DRY-RUN] Would lock NOW (anti-spoof: face static for {now - static_since:.0f}s)")
+                                else:
+                                    log(f">>> LOCKING (anti-spoof: face static for {now - static_since:.0f}s — possible photo)")
+                                    lock_screen(keep_awake_mgr)
+                                locked_until = now + args.cooldown
+                                static_since = None
+                                absence_start = None
+                                log(f"Cooldown {args.cooldown}s...")
+                        else:
+                            static_since = None  # moved — reset
+                    prev_face_center = (cx, cy)
 
                 if keep_awake_mgr and not was_awake:
                     keep_awake_mgr.enable()
@@ -278,6 +319,10 @@ def main() -> None:
 
             # ── Owner NOT present ──
             else:
+                # Reset anti-spoof tracking when no face is recognized
+                prev_face_center = None
+                static_since = None
+
                 if was_awake:
                     if keep_awake_mgr:
                         keep_awake_mgr.disable()

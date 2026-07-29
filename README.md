@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/handnewb/lock-on-absence)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-3.3-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
+[![Version](https://img.shields.io/badge/version-3.4-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
 
 ---
 
@@ -208,6 +208,7 @@ python lock-on-absence.py [OPTIONS]
 | `--max-body-only SECONDS` | `60` | Max time body detection holds unlock without face re-verification |
 | `--stealth` | off | Open/close camera per frame — minimizes LED glow |
 | `--meeting-pause SECONDS` | `30` | Pause monitoring when camera is in use by another app |
+| `--anti-spoof-timeout SECONDS` | `15` | Max time face can be perfectly still before locking (0=disable) |
 
 ### `enroll.py`
 
@@ -384,7 +385,15 @@ python lock-on-absence.py --check-interval 3
 
 ## Changelog
 
-### v3.3 — Auto-Calibrated Recognition Threshold (current)
+### v3.4 — Anti-Spoofing: Movement Verification (current)
+- **New:** `--anti-spoof-timeout` flag — detects photo/video attacks by tracking face micro-movements
+- A real person never stays perfectly still (breathing, micro-saccades). A photo is pixel-static
+- Tracks face center point across frames; if position changes < 3px for N seconds → lock
+- Default 15s timeout; set `--anti-spoof-timeout 0` to disable
+- Auto-enabled when face model is loaded; resets on face absence
+- Lock reason: "anti-spoof: face static for 16s — possible photo"
+
+### v3.3 — Auto-Calibrated Recognition Threshold
 - **New:** recognition threshold auto-calibrated during enrollment — adapts to YOUR face and lighting
 - Threshold saved to `face_model.json` alongside `face_model.yml`
 - Formula: `mean_confidence + 2.5 × stddev`, clamped 30–95
