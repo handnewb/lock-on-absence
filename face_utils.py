@@ -262,22 +262,22 @@ def camera_available(index: int = 0) -> bool:
 class StealthCamera:
     """
     Camera wrapper that opens/closes per frame to minimize LED glow.
-    Trade-off: ~30ms extra per check, LED blinks ~200ms instead of solid.
+    Uses aggressive cleanup to force hardware release on each cycle.
+    Trade-off: extra CPU per check, LED should blink instead of solid.
     """
 
     def __init__(self, index: int = 0, width: int = 640):
         self.index = index
         self.width = width
         self.height = int(width * 0.75)
-        if sys.platform == "win32":
-            self.backend = cv2.CAP_DSHOW
-        else:
-            self.backend = cv2.CAP_V4L2
 
     def read(self) -> tuple[bool, np.ndarray | None]:
-        cap = cv2.VideoCapture(self.index, self.backend)
+        import gc
+        # Use default backend — DSHOW sometimes holds the device after release
+        cap = cv2.VideoCapture(self.index)
         if not cap.isOpened():
             cap.release()
+            del cap
             return False, None
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
@@ -286,7 +286,10 @@ class StealthCamera:
             cap.read()
             time.sleep(0.03)
         ret, frame = cap.read()
+        # Aggressive release: del + gc to force hardware power-down
         cap.release()
+        del cap
+        gc.collect()
         return ret, frame
 
     def release(self) -> None:
