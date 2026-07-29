@@ -314,15 +314,19 @@ def main() -> None:
                     _body_detect_active = False
 
                 last_face_time = now  # reset re-verification timer
+                absence_start = None
+                locked_until = 0.0
 
                 # Anti-spoof: check face movement (photo/video has zero micro-movement)
                 if owner_rect is not None and anti_spoof_timeout > 0 and anti_spoof_timeout != float("inf"):
                     x, y, w, h = owner_rect
                     cx, cy = x + w / 2.0, y + h / 2.0
+                    # Use 1.5% of face width as threshold (~3px for 200px face, ~6px for 400px)
+                    movement_threshold = max(w * 0.015, 4.0)
                     if prev_face_center is not None:
                         dx = abs(cx - prev_face_center[0])
                         dy = abs(cy - prev_face_center[1])
-                        if dx < 3 and dy < 3:  # essentially static
+                        if dx < movement_threshold and dy < movement_threshold:  # essentially static
                             if static_since is None:
                                 static_since = now
                             elif now - static_since > anti_spoof_timeout:
@@ -334,7 +338,6 @@ def main() -> None:
                                 event_log.spoof_lock(now - static_since) if not args.no_lock else None
                                 locked_until = now + args.cooldown
                                 static_since = None
-                                absence_start = None
                                 log(f"Cooldown {args.cooldown}s...")
                         else:
                             static_since = None  # moved — reset
@@ -350,8 +353,6 @@ def main() -> None:
 
                 if absence_start is not None:
                     log("Owner detected — timer reset")
-                absence_start = None
-                locked_until = 0.0
 
             # ── Owner NOT present ──
             else:
