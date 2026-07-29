@@ -31,6 +31,8 @@ from face_utils import (
     BodyDetector,
     KeepAwake,
     Logger,
+    StealthCamera,
+    camera_available,
     detect_faces,
     install_signal_handlers,
     load_cascades,
@@ -113,6 +115,14 @@ def main() -> None:
         "--max-body-only", type=int, default=60,
         help="Max seconds body detection keeps screen unlocked without face re-verification (default: 60)",
     )
+    parser.add_argument(
+        "--stealth", action="store_true",
+        help="Open/close camera per frame to minimize LED glow (small CPU cost)",
+    )
+    parser.add_argument(
+        "--meeting-pause", type=int, default=30,
+        help="Seconds to pause monitoring when camera is in use by another app (default: 30)",
+    )
     args = parser.parse_args()
 
     # ── Logger ──
@@ -136,11 +146,21 @@ def main() -> None:
         log("Mode: ANY FACE (any face prevents lock)")
 
     # ── Webcam ──
-    try:
-        cap = open_camera(args.camera, FRAME_WIDTH)
-    except RuntimeError as exc:
-        log(f"ERROR: {exc}")
-        sys.exit(1)
+    if args.stealth:
+        cap = StealthCamera(args.camera, FRAME_WIDTH)
+        log("Camera mode: STEALTH (open/close per frame — LED blinks instead of solid)")
+        # StealthCamera has no permanent VideoCapture; read() opens/closes per cycle
+        _cap_obj = None  # used for release in finally
+    else:
+        try:
+            _cap_obj = open_camera(args.camera, FRAME_WIDTH)
+        except RuntimeError as exc:
+            log(f"ERROR: {exc}")
+            sys.exit(1)
+        cap = _cap_obj
+
+    # Camera busy tracking
+    camera_busy_until: float = 0.0
 
     # ── Keep-awake ──
     keep_awake_mgr = KeepAwake(log)
@@ -156,7 +176,10 @@ def main() -> None:
     awake_label = "keep-awake ON" if keep_awake_mgr else "keep-awake OFF"
     body_label = f"body-detect ON ({body_detector.status})" if recognizer else "body-detect OFF"
     max_body_label = f"max-body-only={args.max_body_only}s" if recognizer else ""
-    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  cooldown={args.cooldown}s  {max_body_label}  [{lock_label}]  [{awake_label}]  [{body_label}]")
+    stealth_label = " [STEALTH]" if args.stealth else ""
+    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  cooldown={args.cooldown}s  {max_body_label}  [{lock_label}]  [{awake_label}]  [{body_label}]{stealth_label}")
+    if args.stealth:
+        log("LED: camera opens/closes per frame (~200ms blink instead of solid)")
     log("Press Ctrl+C to stop")
 
     # ── State machine ──
@@ -172,15 +195,35 @@ def main() -> None:
 
     try:
         while True:
+            now = time.time()
+
             ret, frame = cap.read()
             if not ret or frame is None:
+                # Camera might be in use by another app (Teams, Zoom, etc.)
+                if not args.stealth and not camera_available(args.camera):
+                    if camera_busy_until == 0.0:
+                        log(f"Camera in use by another app — pausing {args.meeting_pause}s (meeting mode)")
+                    camera_busy_until = now + args.meeting_pause
+                if camera_busy_until and now < camera_busy_until:
+                    # Still waiting — retry camera
+                    if not args.stealth:
+                        try:
+                            _cap_obj = open_camera(args.camera, FRAME_WIDTH)
+                            cap = _cap_obj
+                            camera_busy_until = 0.0
+                            log("Camera available again — resuming monitoring")
+                            continue
+                        except RuntimeError:
+                            pass
                 time.sleep(2)
                 continue
+            else:
+                if camera_busy_until:
+                    camera_busy_until = 0.0
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = detect_faces(cascades, frame, SCALE_FACTOR, MIN_NEIGHBORS, MIN_FACE_SIZE)
             owner_present = False
-            now = time.time()
 
             # ── Face detection ──
             if len(faces) == 0:
@@ -297,7 +340,10 @@ def main() -> None:
     finally:
         if keep_awake_mgr:
             keep_awake_mgr.disable()
-        cap.release()
+        if not args.stealth and _cap_obj is not None:
+            _cap_obj.release()
+        elif args.stealth:
+            cap.release()  # StealthCamera.release() is a no-op
         log("Cleanup complete")
 
 

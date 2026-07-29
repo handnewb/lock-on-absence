@@ -247,6 +247,52 @@ def open_camera(index: int = 0, width: int = 640) -> cv2.VideoCapture:
     raise RuntimeError(f"Camera index {index} not available")
 
 
+def camera_available(index: int = 0) -> bool:
+    """Quick check if camera is free (doesn't keep it open)."""
+    if sys.platform == "win32":
+        backend = cv2.CAP_DSHOW
+    else:
+        backend = cv2.CAP_V4L2
+    cap = cv2.VideoCapture(index, backend)
+    ok = cap.isOpened()
+    cap.release()
+    return ok
+
+
+class StealthCamera:
+    """
+    Camera wrapper that opens/closes per frame to minimize LED glow.
+    Trade-off: ~30ms extra per check, LED blinks ~200ms instead of solid.
+    """
+
+    def __init__(self, index: int = 0, width: int = 640):
+        self.index = index
+        self.width = width
+        self.height = int(width * 0.75)
+        if sys.platform == "win32":
+            self.backend = cv2.CAP_DSHOW
+        else:
+            self.backend = cv2.CAP_V4L2
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        cap = cv2.VideoCapture(self.index, self.backend)
+        if not cap.isOpened():
+            cap.release()
+            return False, None
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        # Discard first frames (dark)
+        for _ in range(3):
+            cap.read()
+            time.sleep(0.03)
+        ret, frame = cap.read()
+        cap.release()
+        return ret, frame
+
+    def release(self) -> None:
+        pass  # nothing to do; each read() opens and closes
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Keep-awake (Windows + Linux)
 # ═══════════════════════════════════════════════════════════════════════

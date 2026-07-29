@@ -201,6 +201,8 @@ python lock-on-absence.py [OPTIONS]
 | `--cooldown SECONDS` | `30` | Silence period after locking before monitoring resumes |
 | `--log-file PATH` | off | Also write timestamped log to a file |
 | `--max-body-only SECONDS` | `60` | Max time body detection holds unlock without face re-verification |
+| `--stealth` | off | Open/close camera per frame — minimizes LED glow |
+| `--meeting-pause SECONDS` | `30` | Pause monitoring when camera is in use by another app |
 
 ### `enroll.py`
 
@@ -377,7 +379,14 @@ python lock-on-absence.py --check-interval 3
 
 ## Changelog
 
-### v3.1 — Body-Only Timeout + Security Hardening (current)
+### v3.2 — Stealth Mode + Meeting Detection (current)
+- **New:** `--stealth` flag — opens/closes camera per frame instead of keeping it open. LED blinks ~200ms instead of glowing solid
+- **New:** `--meeting-pause` flag — auto-detects when camera is in use by another app (Teams, Zoom, Meet, Webex) and pauses monitoring. Resumes automatically when camera is free
+- **New:** `StealthCamera` class in face_utils — per-frame open/capture/close cycle
+- **New:** `camera_available()` helper — quick camera availability check without keeping device open
+- Camera busy detection: logs "Camera in use by another app — pausing Ns (meeting mode)" and retries periodically
+
+### v3.1 — Body-Only Timeout + Security Hardening
 - **New:** `--max-body-only` flag — max time body detection holds unlock without face re-verification (default 60s)
 - **Security fix:** body reference frame only updates when face IS recognized (was: updated during body-only mode, allowing attacker's body to become the new reference)
 - **Security fix:** mandatory periodic face re-verification — body detection alone cannot hold the screen unlocked indefinitely
