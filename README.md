@@ -3,6 +3,11 @@
 > Auto-lock your screen when you walk away. Optional facial recognition so only
 > **you** can keep it unlocked. Works with any webcam — no special hardware.
 
+[![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://python.org)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/handnewb/lock-on-absence)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Version](https://img.shields.io/badge/version-3.2.1-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
+
 ---
 
 ## Table of Contents
@@ -379,7 +384,11 @@ python lock-on-absence.py --check-interval 3
 
 ## Changelog
 
-### v3.2 — Stealth Mode + Meeting Detection (current)
+### v3.2.1 — Aggressive Stealth Release (current)
+- StealthCamera now uses default backend + `del cap` + `gc.collect()` for stronger hardware release
+- Removed explicit CAP_DSHOW/V4L2 backend selection in StealthCamera (default releases faster)
+
+### v3.2 — Stealth Mode + Meeting Detection
 - **New:** `--stealth` flag — opens/closes camera per frame instead of keeping it open. LED blinks ~200ms instead of glowing solid
 - **New:** `--meeting-pause` flag — auto-detects when camera is in use by another app (Teams, Zoom, Meet, Webex) and pauses monitoring. Resumes automatically when camera is free
 - **New:** `StealthCamera` class in face_utils — per-frame open/capture/close cycle
