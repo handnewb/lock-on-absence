@@ -51,6 +51,8 @@ MIN_FACE_SIZE = (30, 30)    # detects faces up to ~1.5m away
 FRAME_WIDTH = 640
 POST_LOCK_COOLDOWN = 30
 RECOGNITION_THRESHOLD = 85  # more tolerant (lower = stricter)
+BODY_DIFF_THRESHOLD = 18    # absdiff mean below this = same body still there
+BODY_REF_INTERVAL = 30      # seconds between reference frame updates
 
 # Paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -216,6 +218,27 @@ def _dedup_faces(faces: list) -> list:
     return kept
 
 
+# ── Body detection (presence without face) ─────────────────────────
+
+def body_present(ref_frame: np.ndarray | None, current_frame: np.ndarray) -> bool:
+    """
+    Compare current frame with reference to check if the body is still there.
+    Uses mean absolute difference on a downscaled grayscale image.
+    Returns True if the scene hasn't changed significantly.
+    """
+    if ref_frame is None:
+        return False
+    try:
+        # Downscale to 160x120 for speed and to ignore small movements
+        small_ref = cv2.resize(ref_frame, (160, 120))
+        small_cur = cv2.resize(current_frame, (160, 120))
+        diff = cv2.absdiff(small_ref, small_cur)
+        mean_diff = float(np.mean(diff))
+        return mean_diff < BODY_DIFF_THRESHOLD
+    except Exception:
+        return False
+
+
 # ── Recognition ────────────────────────────────────────────────────
 
 def recognize_face(
@@ -299,13 +322,16 @@ def main() -> None:
     keep_awake_enabled = not args.no_keep_awake
     lock_label = "DRY-RUN" if args.no_lock else "ACTIVE LOCK"
     awake_label = "keep-awake ON" if keep_awake_enabled else "keep-awake OFF"
-    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  [{lock_label}]  [{awake_label}]")
+    body_label = "body-detect ON" if recognizer else "body-detect OFF"
+    log(f"Monitoring — delay={args.delay}s  interval={args.check_interval}s  [{lock_label}]  [{awake_label}]  [{body_label}]")
     log("Press Ctrl+C to stop")
 
     absence_start: float | None = None
     locked = False
     was_awake = False
-    intruder_streak = 0     # consecutive frames where face != owner
+    intruder_streak = 0
+    body_ref_frame: np.ndarray | None = None
+    last_body_ref_time = 0.0
 
     try:
         while True:
@@ -335,6 +361,12 @@ def main() -> None:
                     keep_awake()
                     was_awake = True
 
+                # Update body reference frame periodically
+                now = time.time()
+                if now - last_body_ref_time >= BODY_REF_INTERVAL:
+                    body_ref_frame = gray.copy()
+                    last_body_ref_time = now
+
                 if absence_start is not None:
                     log("Owner detected — timer reset")
                 absence_start = None
@@ -363,20 +395,30 @@ def main() -> None:
                         absence_start = None
                     # else: first unconfirmed sighting, wait one more frame
                 else:
-                    # No face at all -> use normal delay
+                    # No face at all — check if body is still there
                     intruder_streak = 0
-                    if absence_start is None:
-                        absence_start = time.time()
-                        log(f"No face — waiting {args.delay}s...")
-                    elif time.time() - absence_start >= args.delay:
-                        if args.no_lock:
-                            log(">>> [DRY-RUN] Would lock now (nobody present)")
-                        else:
-                            log(">>> LOCKING (nobody present)")
-                            lock_screen()
-                            locked = True
-                            log(f"Cooldown {POST_LOCK_COOLDOWN}s...")
+
+                    if body_present(body_ref_frame, gray):
+                        # Same body still in the chair — assume it's the owner
+                        if absence_start is not None:
+                            log("Body still present — assuming owner (timer reset)")
                         absence_start = None
+                        if keep_awake_enabled and not was_awake:
+                            keep_awake()
+                            was_awake = True
+                    else:
+                        if absence_start is None:
+                            absence_start = time.time()
+                            log(f"No face — waiting {args.delay}s...")
+                        elif time.time() - absence_start >= args.delay:
+                            if args.no_lock:
+                                log(">>> [DRY-RUN] Would lock now (nobody present)")
+                            else:
+                                log(">>> LOCKING (nobody present)")
+                                lock_screen()
+                                locked = True
+                                log(f"Cooldown {POST_LOCK_COOLDOWN}s...")
+                            absence_start = None
 
             time.sleep(args.check_interval)
 
