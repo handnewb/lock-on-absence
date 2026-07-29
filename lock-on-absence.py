@@ -45,12 +45,12 @@ else:
 CHECK_INTERVAL = 1.5
 ABSENCE_SECONDS = 10
 CAMERA_INDEX = 0
-SCALE_FACTOR = 1.05
-MIN_NEIGHBORS = 3
-MIN_FACE_SIZE = (40, 40)
+SCALE_FACTOR = 1.03         # finer scan for distant/small faces
+MIN_NEIGHBORS = 2           # more sensitive (streak confirmation prevents false locks)
+MIN_FACE_SIZE = (30, 30)    # detects faces up to ~1.5m away
 FRAME_WIDTH = 640
 POST_LOCK_COOLDOWN = 30
-RECOGNITION_THRESHOLD = 75
+RECOGNITION_THRESHOLD = 85  # more tolerant (lower = stricter)
 
 # Paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -154,12 +154,16 @@ def load_cascades() -> list[cv2.CascadeClassifier]:
 
 def detect_faces_all(cascades: list, frame: np.ndarray) -> list:
     """
-    Detect faces using ALL cascades (frontal + profile).
+    Detect faces using ALL cascades (frontal + left profile + right profile).
+    Right profile is detected by mirroring the frame.
     Returns deduplicated list of rectangles [(x, y, w, h), ...].
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
     all_faces = []
+
     for cascade in cascades:
+        # Normal detection (frontal + left profile)
         faces = cascade.detectMultiScale(
             gray,
             scaleFactor=SCALE_FACTOR,
@@ -167,7 +171,19 @@ def detect_faces_all(cascades: list, frame: np.ndarray) -> list:
             minSize=MIN_FACE_SIZE,
         )
         all_faces.extend(faces)
-    # Deduplicate overlapping rectangles (keep the larger one)
+
+        # Mirror detection for right profile (only the profile cascade benefits)
+        gray_flipped = cv2.flip(gray, 1)
+        faces_flipped = cascade.detectMultiScale(
+            gray_flipped,
+            scaleFactor=SCALE_FACTOR,
+            minNeighbors=MIN_NEIGHBORS,
+            minSize=MIN_FACE_SIZE,
+        )
+        # Un-flip coordinates: x' = width - x - rect_width
+        for (fx, fy, fw, fh) in faces_flipped:
+            all_faces.append((w - fx - fw, fy, fw, fh))
+
     if len(all_faces) <= 1:
         return all_faces
     return _dedup_faces(all_faces)

@@ -60,11 +60,18 @@ def load_cascades() -> list:
 
 
 def detect_any_face(cascades: list, gray: np.ndarray) -> list:
-    """Detect faces using all cascades, return deduplicated rectangles."""
+    """Detect faces using all cascades (including mirrored for right profile)."""
+    h, w = gray.shape
     all_faces = []
     for _name, cascade in cascades:
-        faces = cascade.detectMultiScale(gray, 1.05, 3, minSize=(80, 80))
+        # Normal detection
+        faces = cascade.detectMultiScale(gray, 1.03, 2, minSize=(60, 60))
         all_faces.extend(faces)
+        # Mirrored for right profile
+        gray_flipped = cv2.flip(gray, 1)
+        faces_flipped = cascade.detectMultiScale(gray_flipped, 1.03, 2, minSize=(60, 60))
+        for (fx, fy, fw, fh) in faces_flipped:
+            all_faces.append((w - fx - fw, fy, fw, fh))
     if len(all_faces) <= 1:
         return all_faces
     # Dedup
