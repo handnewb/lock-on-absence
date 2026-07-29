@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+face_model.yml
+*.egg-info/
+dist/
+build/
+.vscode/
+.idea/
