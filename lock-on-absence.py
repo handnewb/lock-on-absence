@@ -80,7 +80,8 @@ def recognize_owner(
     x, y, w, h = face_rect
     roi = cv2.resize(gray_frame[y : y + h, x : x + w], (200, 200))
     _label, confidence = recognizer.predict(roi)
-    return confidence < threshold, confidence
+    result = confidence < threshold
+    return result, confidence
 
 
 # ── Main ───────────────────────────────────────────────────────────
@@ -272,6 +273,7 @@ def main() -> None:
         log("Blink detection: unavailable (eye cascade missing)")
     try:
         _consecutive_fails = 0
+        _startup_grace = time.time() + 5  # 5s grace period before intruder checks
         while True:
             now = time.time()
 
@@ -398,21 +400,24 @@ def main() -> None:
                         keep_awake_mgr.disable()
                     was_awake = False
 
-                # Face detected but NOT owner → intruder check
+                # Face detected but NOT owner → intruder check (after grace period)
                 if len(faces) > 0 and recognizer is not None:
-                    intruder_streak += 1
-                    if intruder_streak >= 2:
-                        if args.no_lock:
-                            log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
-                        else:
-                            log(">>> LOCKING NOW (intruder confirmed)")
-                            lock_screen(keep_awake_mgr)
-                        event_log.intruder_lock() if not args.no_lock else None
-                        locked_until = now + args.cooldown
-                        intruder_streak = 0
-                        absence_start = None
-                        _body_detect_active = False
-                        log(f"Cooldown {args.cooldown}s...")
+                    if now < _startup_grace:
+                        pass  # grace period — don't lock while user is settling in
+                    else:
+                        intruder_streak += 1
+                        if intruder_streak >= 2:
+                            if args.no_lock:
+                                log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
+                            else:
+                                log(">>> LOCKING NOW (intruder confirmed)")
+                                lock_screen(keep_awake_mgr)
+                            event_log.intruder_lock() if not args.no_lock else None
+                            locked_until = now + args.cooldown
+                            intruder_streak = 0
+                            absence_start = None
+                            _body_detect_active = False
+                            log(f"Cooldown {args.cooldown}s...")
                 else:
                     # No face at all — check body presence
                     intruder_streak = 0
