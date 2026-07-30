@@ -12,7 +12,7 @@ jobs:
       - name: Install deps
         run: |
           pip install -r requirements.txt pytest pyflakes
-          pip install opencv-python opencv-contrib-python
+          pip install opencv-contrib-python
       - name: pyflakes
         run: |
           python -m pyflakes face_utils.py enroll.py lock-on-absence.py presence_state_machine.py 2>&1 | grep -v "imported but unused" || true

@@ -18,6 +18,8 @@ Setup:
 Works on Windows, Linux, and macOS.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
