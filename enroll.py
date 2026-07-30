@@ -10,6 +10,7 @@ Usage:
     python enroll.py --samples 50              # 50 samples (more accurate)
     python enroll.py --users Everton,Ana       # two authorized users
     python enroll.py --camera 1                # use a different camera
+    python enroll.py --purge                   # delete model + metadata
 
 Tips:
     Move your head: front -> left profile -> right profile -> up -> down.
@@ -18,6 +19,7 @@ Tips:
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -45,11 +47,11 @@ RECOGNITION_THRESHOLD = 65  # documented default LBPH confidence threshold
 def _enroll_user(log: Logger, cap: cv2.VideoCapture, cascades: list,
                  user_label: int, user_name: str, samples_needed: int) -> list:
     """Capture face samples for one user. Returns list of (roi, label) tuples."""
-    log(f"")
-    log(f"=== User {user_label}: {user_name} ===")
-    log(f"Move your head through all angles:")
-    log(f"  -> FRONT -> LEFT profile -> RIGHT profile -> UP -> DOWN")
-    log(f"")
+    log("")
+    log("=== User %s: %s ===" % (user_label, user_name))
+    log("Move your head through all angles:")
+    log("  -> FRONT -> LEFT profile -> RIGHT profile -> UP -> DOWN")
+    log("")
 
     data: list = []
     count = 0
@@ -65,7 +67,9 @@ def _enroll_user(log: Logger, cap: cv2.VideoCapture, cascades: list,
 
         if len(faces) == 1:
             x, y, w, h = faces[0]
-            roi = cv2.resize(gray[y : y + h, x : x + w], (200, 200))
+            roi = _safe_roi(gray, (x, y, w, h))
+            if roi is None:
+                continue
             data.append((roi, user_label))
             count += 1
             multi_warn = 0
@@ -84,6 +88,18 @@ def _enroll_user(log: Logger, cap: cv2.VideoCapture, cascades: list,
     print("")
     log(f"Captured {len(data)} samples for {user_name}")
     return data
+
+
+def _safe_roi(gray: np.ndarray, rect: tuple) -> np.ndarray | None:
+    """Extract face ROI with boundary clamping.
+    YuNet can return negative coordinates at frame edges (P1-5)."""
+    H, W = gray.shape[:2]
+    x, y, w, h = rect
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(W, x + w), min(H, y + h)
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return None
+    return gray[y0:y1, x0:x1]
 
 
 def main() -> None:
@@ -116,6 +132,37 @@ def main() -> None:
 
     log = Logger()
 
+    # ── Handle --purge ──
+    if args.purge:
+        model_path = Path(args.output)
+        meta_path = model_path.with_suffix(".json")
+        deleted_any = False
+        for p in [model_path, meta_path]:
+            if p.exists():
+                p.unlink()
+                log(f"Deleted: {p}")
+                deleted_any = True
+        if deleted_any:
+            log("Face data purged — all enrolled users revoked.")
+        else:
+            log("No face data found — nothing to purge.")
+        sys.exit(0)
+
+    # ── Consent prompt ──
+    if not args.no_consent:
+        log("")
+        log("By enrolling your face, you consent to:")
+        log("  - Periodic webcam captures while monitoring is active")
+        log("  - Storage of facial recognition data (LBPH model) on this machine")
+        log("  - Logging of events (presence, absence, intruder) to local files and SIEM")
+        log("")
+        try:
+            input("Press Enter to continue, or Ctrl+C to cancel...")
+        except (EOFError, KeyboardInterrupt):
+            log("")
+            log("Enrollment cancelled.")
+            sys.exit(0)
+
     # Parse users
     if args.users:
         user_names = [n.strip() for n in args.users.split(",") if n.strip()]
@@ -138,16 +185,12 @@ def main() -> None:
 
     # ── Enroll each user ──
     all_data: list = []
-    if len(user_names) > 1:
-        log(f"Multi-user enrollment: {len(user_names)} user(s)")
-        log(f"Samples per user: {samples_per}")
-        log("")
 
     for idx, name in enumerate(user_names, start=1):
-        log(f"=== User {idx}: {name} ===")
         if idx > 1:
-            log("(5s pause — switch users now)")
+            log(f"(5s pause — {name}, sit down now)")
             time.sleep(5)
+        user_data = _enroll_user(log, cap, cascades, idx, name, args.samples)
         all_data.extend(user_data)
 
     cap.release()
@@ -165,16 +208,23 @@ def main() -> None:
     recognizer.write(args.output)
     log(f"Model saved to: {args.output}")
 
+    # Restrict model file permissions (P1-4)
+    try:
+        os.chmod(args.output, 0o600)
+    except OSError:
+        pass
+
     # Save metadata (user names, sample count)
     try:
         meta_path = str(Path(args.output).with_suffix(".json"))
         meta = {
-            "threshold": RECOGNITION_THRESHOLD,  # documented default; tune via face_model.json
+            "threshold": RECOGNITION_THRESHOLD,
             "samples": len(faces_only),
             "users": {str(idx): name for idx, name in enumerate(user_names, start=1)},
         }
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
+        os.chmod(meta_path, 0o600)
         log(f"Metadata saved to: {meta_path}")
         log(f"Recognition threshold: {RECOGNITION_THRESHOLD} (default — edit face_model.json to tune)")
     except OSError as e:

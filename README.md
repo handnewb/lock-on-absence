@@ -6,7 +6,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-lightgrey)](https://github.com/handnewb/lock-on-absence)
 [![Version](https://img.shields.io/badge/version-4.1.0-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-7%20passed%20(v4.1)-success)](test_state_machine.py)
+[![Tests](https://img.shields.io/badge/tests-14%20passed%20(v4.1)-success)](tests/test_smoke.py)
 
 ---
 
@@ -128,6 +128,7 @@ python lock-on-absence.py --siem lock-events.json
 | `--event-log` | — | Enable OS event logging (Windows Event Log / syslog) |
 | `--no-lock` | — | Dry-run: log decisions without locking (for FAR/FRR measurement) |
 | `--any-face` | — | Allow any detected face to keep screen unlocked (no model needed) |
+| `--camera-fail-grace` | `20` | Seconds before fail-closed lock on camera failure |
 | `--meeting-pause` | `30` | Seconds to pause when camera is in use by another app |
 | `--yunet` | — | Use YuNet DNN detector instead of Haar cascades |
 | `--stealth` | — | Open/close camera per frame (LED blinks instead of stays on) |
@@ -171,7 +172,7 @@ Users not selected by `--model` are **ignored** — they count as non-owner face
 When `--siem <path>` is passed, each lock event is appended as a newline-delimited JSON record:
 
 ```json
-{"timestamp":"2026-07-30T10:15:30","event_id":1001,"event":"intruder_lock","message":"Screen locked: intruder detected (non-owner face)","hostname":"WORKSTATION-01"}
+{"timestamp":"2026-07-30T10:15:30","event_id":1001,"event":"intruder_lock","message":"Screen locked: intruder detected (non-owner face)","hostname":"WORKSTATION-01","dry_run":false}
 ```
 
 ### Event ID reference
@@ -185,7 +186,7 @@ When `--siem <path>` is passed, each lock event is appended as a newline-delimit
 | 1005 | `lock_failed` | ERROR | All lock mechanisms returned failure |
 | 2001 | `camera_error` | ERROR | Persistent camera read failure |
 
-All events include `hostname`, used for cross-endpoint correlation in SIEM ingestion (Splunk, Elastic, Sentinel). When `--event-log` is also enabled, the same events go to Windows Event Log (source: `LockOnAbsence`) or syslog (tag: `lock-on-absence`).
+| All events include `hostname` and `dry_run` (true when `--no-lock` is active), used for cross-endpoint correlation in SIEM ingestion (Splunk, Elastic, Sentinel). When `--event-log` is also enabled, the same events go to Windows Event Log (source: `LockOnAbsence`) or syslog (tag: `lock-on-absence`).
 
 ---
 
@@ -199,7 +200,7 @@ from presence_state_machine import PresenceStateMachine, Config, Observation, St
 sm = PresenceStateMachine(Config(absence_delay=10.0))
 st = State()
 
-obs = Observation(t=time.time(), faces=1, owner_recognized=True,
+|obs = Observation(t=time.monotonic(), faces=1, owner_recognized=True,
                   scene_unchanged=True, camera_ok=True)
 decision, reason = sm.step(obs, st)
 # decision == Decision.KEEP, reason == Reason.NONE
@@ -214,10 +215,10 @@ decision, reason = sm.step(obs, st)
 5. **Absence** → **LOCK** after `absence_delay` without face or body
 6. **Body-only** → **LOCK** after `max_body_only` with scene unchanged but no face
 
-### Tests (7/7 passing)
+### Tests (14/14 passing)
 
 ````bash
-python -m pytest test_state_machine.py -v
+python -m pytest tests/ -v
 ````
 
 | Test | Validates |
@@ -229,6 +230,10 @@ python -m pytest test_state_machine.py -v
 | `test_camera_failure_fail_closed` | Camera failure after grace → LOCK |
 | `test_cooldown_blocks` | Recent lock prevents re-triggering |
 | `test_recovery_resets` | Owner re-appearance clears intruder streak |
+| `test_module_imports` | All modules import without errors (4 tests) |
+| `test_no_undefined_names` | pyflakes static analysis on all source files (4 tests) |
+| `test_state_machine_integration` | State machine is imported by main module |
+| `test_purge_and_no_consent_flags` | `--purge` and `--no-consent` implemented in enroll.py (2 tests) |
 
 ---
 
@@ -239,12 +244,17 @@ lock-on-absence/
 ├── lock-on-absence.py          # Main loop, CLI, state machine integration
 ├── face_utils.py               # Detectors (Haar, YuNet), recognizer (LBPH),
 │                               #   KeepAwake, lock_screen, EventLogger, Logger
-├── enroll.py                   # Face enrollment, training, --purge
+├── enroll.py                   # Face enrollment, training, --purge, --no-consent
 ├── presence_state_machine.py   # Pure decision logic (no deps, testable)
 ├── watchdog.py                 # External watchdog (heartbeat → stale detection)
-├── test_state_machine.py       # pytest suite for state machine
+├── tests/
+│   ├── __init__.py             # Package marker
+│   └── test_smoke.py          # pytest suite: imports, CLI, pyflakes, flags
 ├── install.sh                  # Linux systemd installer with venv
-├── requirements.txt            # opencv-contrib-python, numpy
+├── requirements.txt            # opencv-contrib-python, numpy, pyflakes
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # GitHub Actions: pytest + pyflakes on push/PR
 ├── LICENSE                     # MIT
 ├── __init__.py                 # __version__ = "4.1.0"
 └── .gitignore
@@ -256,7 +266,8 @@ lock-on-absence/
 2. **Fail-closed by default** — `--on-camera-failure lock` means a dead camera locks the workstation, not leaves it open. See [C3 in the adversarial review](https://github.com/handnewb/lock-on-absence/issues/1).
 3. **SIEM is the product** — The most defensible feature is the evidential trail: who was at the workstation, when did they leave, did the system lock. Structured JSON + OS event log + hostname enables cross-endpoint correlation.
 4. **Watchdog as second layer** — Heartbeat file written every 60s, `watchdog.py` reads it and locks if stale >120s. Catches crashes, zombs, and kills that the main loop can't handle.
-5. **No anti-spoof claims** — The eye-cascade blink detector was removed in v4.0 because it was structurally incapable of detecting a blink. Claims about photo detection have been removed. See [C5](https://github.com/handnewb/lock-on-absence/issues/1).
+6. **No anti-spoof claims** — The eye-cascade blink detector was removed in v4.0 because it was structurally incapable of detecting a blink. Claims about photo detection have been removed. A movement-based anti-spoof remains (`--anti-spoof-timeout`) but does not claim blink-level liveness. See [C5](https://github.com/handnewb/lock-on-absence/issues/1).
+7. **All internal durations use `time.monotonic()`** — immune to system clock jumps. The heartbeat file uses `time.time()` for compatibility with the external watchdog.
 
 ---
 
@@ -267,10 +278,10 @@ lock-on-absence/
 | Fail-closed on camera failure | ✅ Default `lock` | — |
 | Fail-closed on crash | ✅ Watchdog | — |
 | SIEM audit trail | ✅ JSON + Event Log | CEF/LEEF |
-| Face template protection | — `face_model.json` is world-readable | `chmod 600`, DPIA |
-| FAR/FRR measurement | 🔧 `--no-lock` + SIEM | Published benchmark |
-| Liveness detection | ❌ Removed in v4.0 | MediaPipe landmarks |
-| External watchdog | ✅ `watchdog.py` | systemd `WatchdogSec` |
+| Face template protection | ✅ `chmod 600` after enrollment | DPIA, encryption |
+| FAR/FRR measurement | ✅ `--no-lock` + SIEM `dry_run` field | Published benchmark |
+| Liveness detection | ⚠️ Movement‑based anti‑spoof | MediaPipe landmarks |
+| External watchdog | ✅ `watchdog.py` + `systemd` (partial) | systemd `WatchdogSec` |
 | Multi-factor | ❌ Webcam only | TESSERA/BLE token |
 
 See [adversarial review — Issue #1](https://github.com/handnewb/lock-on-absence/issues/1) for the full security audit.
@@ -282,9 +293,8 @@ See [adversarial review — Issue #1](https://github.com/handnewb/lock-on-absenc
 - **Facial recognition uses LBPH (2006)** — it works in consistent indoor lighting with frontal faces but is not competitive with modern embeddings. SFace ONNX is the planned replacement (§4.4).
 - **False locks possible** — threshold tuning is environment-specific. Use `--no-lock` + `--siem` to measure FAR/FRR before deploying.
 - **One webcam at a time** — the camera is a shared resource. `--meeting-pause` avoids conflicts with video calls, but switching users or sharing peripherals isn't handled.
-- **macOS lock is screen blanking** — macOS doesn't expose a reliable `LockWorkStation()` equivalent without Accessibility permissions. The fallback keystroke + `pmset displaysleepnow` blanks the screen but does not require authentication to wake.
-- **No CI/CD yet** — tests pass locally. GitHub Actions pipeline planned.
-- **Biometric data is stored in plain files** — `face_model.yml` (LBPH histograms) and `face_model.json` (user names) are not encrypted. Use at your own risk in regulated environments.
+- **Biometric data is stored in plain files** — `face_model.yml` (LBPH histograms) and `face_model.json` (user names) are not encrypted. Use at your own risk in regulated environments. Files are protected via `chmod 600` after enrollment.
+- **Privacy consent** — `enroll.py` prompts for consent before capture. Use `--no-consent` for automated/scripted enrollment.
 
 ---
 
@@ -292,8 +302,6 @@ See [adversarial review — Issue #1](https://github.com/handnewb/lock-on-absenc
 
 - [ ] **FAR/FRR harness** — replay recorded video with injected timestamps to measure error rates
 - [ ] **SFace ONNX recognition** (`cv2.FaceRecognizerSF`) — transferable threshold, no LBPH
-- [ ] **GitHub Actions CI** — pytest on push + PR
-- [ ] **systemd `WatchdogSec=30`** integration with `sd_notify`
 - [ ] **Windows Scheduled Task watchdog** — lightweight `watchdog.py` scheduled via PowerShell
 - [ ] **`chmod 600` + encryption** for face templates
 - [ ] **CEF / LEEF output** for Splunk native ingestion
@@ -309,7 +317,9 @@ PRs are welcome. Please follow the existing code style (typed Python, KISS, DRY)
 Areas that need contribution:
 - **Dataset** — labeled video captures for FAR/FRR measurement (owner present, intruder, empty chair, backlight, oblique angles)
 - **MediaPipe liveness** — real EAR or active-challenge blink detection
-- **CI/CD** — GitHub Actions workflow for pytest + lint
+- **`chmod 600`** on generated face_model files after enrollment
+- **GitHub Actions CI** — pytest (14 tests) + pyflakes on push and PR
+- **Privacy consent prompt** before enrollment; `--no-consent` to skip
 - **SFace integration** — swap LBPH for `cv2.FaceRecognizerSF` with published cosine threshold
 
 ---

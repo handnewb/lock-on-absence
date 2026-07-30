@@ -38,7 +38,6 @@ from face_utils import (
     StealthCamera,
     YUNetDetector,
     camera_available,
-    create_detector,
     detect_faces,
     detect_faces_dnn,
     download_yunet,
@@ -83,19 +82,26 @@ def recognize_owner(
     confidence is LBPH distance — lower = better match.
     """
     x, y, w, h = face_rect
-    roi = cv2.resize(gray_frame[y : y + h, x : x + w], (200, 200))
+    H, W = gray_frame.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(W, x + w), min(H, y + h)
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return False, 999.0
+    roi = cv2.resize(gray_frame[y0:y1, x0:x1], (200, 200))
     _label, confidence = recognizer.predict(roi)
     result = confidence < threshold
     return result, confidence
 
 
-def _do_lock(keep_awake_mgr, event_log, log, reason: str) -> None:
-    """Lock screen with return-code verification and SIEM logging."""
+def _do_lock(keep_awake_mgr, event_log, log, reason: str) -> bool:
+    """Lock screen with return-code verification and SIEM logging.
+    Returns True if lock_screen confirmed success, False otherwise."""
     ok = lock_screen(keep_awake_mgr)
     if ok:
-        return
+        return True
     log(f"ERROR: lock_screen() returned False — screen may NOT be locked! ({reason})")
     event_log.lock_failed(reason)
+    return False
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -181,7 +187,7 @@ def main() -> None:
 
     # ── Logger + Event log ──
     log = Logger(args.log_file)
-    event_log = EventLogger(args.event_log, args.siem)
+    event_log = EventLogger(args.event_log, args.siem, dry_run=args.no_lock)
     if args.event_log:
         log(f"Event log: {'Windows Event Log' if sys.platform == 'win32' else 'syslog'} enabled")
     if args.siem:
@@ -200,7 +206,6 @@ def main() -> None:
         detector, detector_type = load_cascades(log), "haar"
     if detector_type == "haar":
         log(f"Loaded {len(detector)} Haar cascade(s)")
-    cascades = detector  # legacy alias for Haar path
 
     # ── Recognition model (optional) ──
     recognizer = None  # type: cv2.face.LBPHFaceRecognizer | None
@@ -216,7 +221,7 @@ def main() -> None:
         if os.path.exists(meta_path):
             with open(meta_path) as f:
                 meta = json.load(f)
-            recognition_threshold = meta.get("threshold", RECOGNITION_THRESHOLD)
+            recognition_threshold = max(20, min(100, meta.get("threshold", RECOGNITION_THRESHOLD)))
             users_map = meta.get("users", {})
             if users_map:
                 log(f"Authorized users: {', '.join(users_map.values())}")
@@ -250,8 +255,8 @@ def main() -> None:
             sys.exit(1)
         cap = _cap_obj
 
-    # Camera busy tracking
-    camera_busy_until: float = 0.0
+    # Track meeting-pause state
+    _meeting_pause_until: float = 0.0
 
     # ── Keep-awake ──
     keep_awake_mgr = KeepAwake(log)
@@ -286,11 +291,10 @@ def main() -> None:
     )
     psm = PresenceStateMachine(psm_config)
     psm_state = PSMState()
-    _previous_decision = (Decision.KEEP, Reason.NONE)
 
     # Legacy state vars (side effects that still need tracking)
     was_awake = False
-    last_face_time: float = time.time()
+    last_face_time: float = time.monotonic()
     max_body_only: float = float(args.max_body_only) if recognizer else float("inf")
     prev_face_center: tuple[float, float] | None = None
     static_since: float | None = None
@@ -307,9 +311,15 @@ def main() -> None:
 
     try:
         _consecutive_fails = 0
-        _startup_grace = time.time() + 5  # 5s grace period before intruder checks
+        _startup_grace = time.monotonic() + 5  # 5s grace period before intruder checks
         while True:
-            now = time.time()
+            now = time.monotonic()
+            wall_now = time.time()
+
+            # Meeting pause: skip checks if camera was recently busy
+            if _meeting_pause_until > now:
+                time.sleep(2)
+                continue
 
             ret, frame = cap.read()
             if not ret or frame is None:
@@ -334,18 +344,28 @@ def main() -> None:
                     except RuntimeError:
                         pass
 
+                # Meeting pause: camera may be busy by another app (Zoom/Teams)
+                if _consecutive_fails >= 5:
+                    pause = float(args.meeting_pause)
+                    _meeting_pause_until = now + pause
+                    log(f"Camera unavailable for {_consecutive_fails} attempts — meeting pause {pause:.0f}s")
+                    if keep_awake_mgr:
+                        keep_awake_mgr.disable()
+                        was_awake = False
+                    time.sleep(2)
+                    continue
+
                 obs = Observation(
                     t=now, faces=0, owner_recognized=False,
                     scene_unchanged=False, camera_ok=False,
                 )
                 decision, reason = psm.step(obs, psm_state)
 
-                if decision == Decision.LOCK:
-                    if reason == Reason.CAMERA_FAILURE:
-                        log(f">>> LOCKING (no camera signal for — fail-closed)")
-                        _do_lock(keep_awake_mgr, event_log, log, "camera-failure")
-                        event_log.camera_error(f"fail-closed lock")
-                    log(f"Cooldown {args.cooldown}s...")
+                if decision == Decision.LOCK and reason == Reason.CAMERA_FAILURE:
+                    log(">>> LOCKING (no camera signal for — fail-closed)")
+                    _do_lock(keep_awake_mgr, event_log, log, "camera-failure")
+                    event_log.camera_error("fail-closed lock")
+                log(f"Cooldown {args.cooldown}s...")
 
                 if _consecutive_fails == 1 or _consecutive_fails % 10 == 0:
                     log(f"Camera read failed ({_consecutive_fails}x) — retrying...")
@@ -397,9 +417,13 @@ def main() -> None:
                 extra = ""
                 if faces and recognizer:
                     _x, _y, _w, _h = faces[0]
-                    _roi = cv2.resize(gray[_y:_y+_h, _x:_x+_w], (200, 200))
-                    _l, _c = recognizer.predict(_roi)
-                    extra = f", conf={_c:.0f}, thresh={recognition_threshold}"
+                    _H, _W = gray.shape[:2]
+                    _x0, _y0 = max(0, _x), max(0, _y)
+                    _x1, _y1 = min(_W, _x + _w), min(_H, _y + _h)
+                    if _x1 - _x0 >= 20 and _y1 - _y0 >= 20:
+                        _roi = cv2.resize(gray[_y0:_y1, _x0:_x1], (200, 200))
+                        _l, _c = recognizer.predict(_roi)
+                        extra = f", conf={_c:.0f}, thresh={recognition_threshold}"
                 log(f"DEBUG: {len(faces)} face(s), owner={owner_present}{extra}")
                 main._last_debug = now  # type: ignore[attr-defined]
 
@@ -419,7 +443,7 @@ def main() -> None:
                     main._last_heartbeat = now
                     try:
                         with open(os.path.join(str(SCRIPT_DIR), "watchdog_heartbeat.txt"), "w") as _wfh:
-                            _wfh.write(str(now))
+                            _wfh.write(str(wall_now))
                     except OSError:
                         pass
 
@@ -457,7 +481,7 @@ def main() -> None:
                     body_detector.update_ref(gray)
                     if not body_detector.calibrated:
                         body_detector.complete_calibration()
-                        log(f"Body detector calibrated — threshold={body_detector._threshold:.1f}")
+                        log(f"Body detector calibrated — threshold={body_detector.threshold:.1f}")
 
                 if psm_state.absence_start is not None:
                     log("Owner detected — timer reset")
@@ -465,6 +489,11 @@ def main() -> None:
             elif decision == Decision.LOCK:
                 # ── Lock decision from state machine ──
                 if reason == Reason.INTRUDER:
+                    # Startup grace: skip intruder lock during first 5 seconds
+                    if now < _startup_grace:
+                        log(f"Startup grace ({(now - _startup_grace + 5):.1f}s remaining) — intruder suppressed")
+                        _startup_grace = now + 5  # extend grace on each intruder in window
+                        continue
                     if args.no_lock:
                         log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
                         event_log.intruder_lock()

@@ -1,0 +1,20 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt pytest pyflakes
+          pip install opencv-python opencv-contrib-python
+      - name: pyflakes
+        run: |
+          python -m pyflakes face_utils.py enroll.py lock-on-absence.py presence_state_machine.py 2>&1 | grep -v "imported but unused" || true
+      - name: pytest
+        run: python -m pytest tests/ -v

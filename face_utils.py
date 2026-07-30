@@ -8,7 +8,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -180,7 +179,7 @@ class BodyDetector:
         self._last_ref_time = 0.0
         self._noise_samples: list[float] = []
         self._calibrated = False
-        self.calibrated = self._calibrated  # alias for external access
+        # calibrated is exposed as a read-only @property below
 
     def update_ref(self, gray_frame: np.ndarray) -> None:
         """Update reference frame (call when owner face is detected)."""
@@ -358,7 +357,6 @@ class YUNetDetector:
 def download_yunet(target_dir: str = ".") -> str:
     """Download YuNet ONNX model. Returns path on success, raises on failure."""
     import urllib.request
-    import tempfile
 
     # NOTE: Integrity check via SHA-256 was considered but the model hash
     # changes with OpenCV Zoo versions.  The atomic download (temp + rename)
@@ -462,9 +460,10 @@ class EventLogger:
         2001: "camera_error",
     }
 
-    def __init__(self, enabled: bool = False, siem_path: str | None = None):
+    def __init__(self, enabled: bool = False, siem_path: str | None = None, dry_run: bool = False):
         self.enabled = enabled and sys.platform in ("win32", "linux")
         self.siem_path = siem_path
+        self.dry_run = dry_run
 
     def _emit(self, event_id: int, message: str, level: str = "WARNING", extra: dict | None = None) -> None:
         if self.enabled:
@@ -483,6 +482,7 @@ class EventLogger:
             "event": self._EVENT_NAMES.get(event_id, "unknown"),
             "message": message,
             "hostname": os.uname().nodename if hasattr(os, "uname") else os.environ.get("COMPUTERNAME", "unknown"),
+            "dry_run": self.dry_run,
             **extra,
         }
         try:
@@ -639,7 +639,6 @@ def lock_screen(keep_awake: KeepAwake | None = None) -> bool:
         ["i3lock", "-n"],
         ["slock"],
         ["osascript", "-e", 'tell application "System Events" to keystroke "q" using {command down, control down}'],
-        ["pmset", "displaysleepnow"],  # fallback: blank screen
     ):
         try:
             r = subprocess.run(

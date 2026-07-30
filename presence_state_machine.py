@@ -5,7 +5,7 @@ Extracted per adversarial review §4.6: every lock decision is a
 deterministic function of (observation, config).  Testable with pytest.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional
 

@@ -73,7 +73,7 @@ ExecStart=$PYTHON_ABS $SCRIPT_DIR/lock-on-absence.py
 WorkingDirectory=$SCRIPT_DIR
 Restart=always
 RestartSec=10
-WatchdogSec=30
+# Watchdog disabled by default — enable via override if sd_notify is implemented
 
 [Install]
 WantedBy=default.target
