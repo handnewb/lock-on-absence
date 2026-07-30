@@ -203,14 +203,9 @@ class BodyDetector:
             diff = cv2.absdiff(small_ref, small_cur)
             mean_diff = float(np.mean(diff))
 
-            # Calibrate threshold from normal micro-movements
+            # Collect noise samples during normal operation
             if not self._calibrated and mean_diff > 0:
                 self._noise_samples.append(mean_diff)
-                if len(self._noise_samples) >= self.calibration_samples:
-                    baseline = sum(self._noise_samples) / len(self._noise_samples)
-                    # Departure = multiplier × baseline noise, with a floor
-                    self.threshold = max(baseline * self.calibration_multiplier, 8.0)
-                    self._calibrated = True
 
             return mean_diff < self.threshold
         except Exception:
@@ -219,6 +214,14 @@ class BodyDetector:
     @property
     def calibrated(self) -> bool:
         return self._calibrated
+
+    def complete_calibration(self) -> None:
+        """Finalize baseline calibration. Call only when owner presence is confirmed.
+        Clamps threshold to [8, 25] to prevent runaway values from noisy baselines."""
+        if self._noise_samples and not self._calibrated:
+            baseline = sum(self._noise_samples) / len(self._noise_samples)
+            self.threshold = max(min(baseline * self.calibration_multiplier, 25.0), 8.0)
+            self._calibrated = True
 
     @property
     def status(self) -> str:
