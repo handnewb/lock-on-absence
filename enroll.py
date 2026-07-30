@@ -156,7 +156,8 @@ def main() -> None:
         confidences.append(conf)
     mean_conf = float(np.mean(confidences))
     std_conf = float(np.std(confidences))
-    calibrated = max(min(mean_conf + 2.5 * std_conf, 95.0), 30.0)
+    # Threshold = mean + 2.5σ, clamped between 55 and 95
+    calibrated = max(min(mean_conf + 2.5 * std_conf, 95.0), 55.0)
     log(f"  Mean confidence: {mean_conf:.1f}")
     log(f"  Std deviation:   {std_conf:.1f}")
     log(f"  Calibrated threshold: {calibrated:.0f} (lower = stricter, default was 85)")
