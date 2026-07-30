@@ -303,6 +303,10 @@ class StealthCamera:
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Blink detection (liveness proof — anti-spoofing)
+#  NOTE: removed in v4.0 — see C5 in adversarial review.
+#  The eye cascade cannot detect blinks (trained on open eyes only),
+#  and the movement-based check had unacceptable false positives.
+#  Proper liveness requires MediaPipe landmarks or active challenge.
 # ═══════════════════════════════════════════════════════════════════════
 
 _EYE_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_eye.xml"
@@ -494,6 +498,7 @@ class EventLogger:
     LOCK_ABSENCE = 1002
     LOCK_SPOOF = 1003
     LOCK_BODY_TIMEOUT = 1004
+    LOCK_FAILED = 1005
     ERROR_CAMERA = 2001
 
     _EVENT_NAMES = {
@@ -501,6 +506,7 @@ class EventLogger:
         1002: "absence_lock",
         1003: "spoof_lock",
         1004: "body_timeout_lock",
+        1005: "lock_failed",
         2001: "camera_error",
     }
 
@@ -551,6 +557,9 @@ class EventLogger:
 
     def camera_error(self, detail: str) -> None:
         self._emit(self.ERROR_CAMERA, f"Camera error: {detail}", "ERROR", {"detail": detail})
+
+    def lock_failed(self, reason: str) -> None:
+        self._emit(self.LOCK_FAILED, f"Screen lock FAILED: {reason}", "ERROR", {"reason": reason})
 #  Keep-awake (Windows + Linux)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -648,15 +657,14 @@ class KeepAwake:
 def lock_screen(keep_awake: KeepAwake | None = None) -> bool:
     """
     Lock the workstation. Releases keep-awake first so the lock sticks.
-    Returns True on success.
+    Returns True only if a lock mechanism confirmed success (returncode 0).
     """
     if keep_awake:
         keep_awake.disable()
 
     if sys.platform == "win32":
         import ctypes
-        ctypes.windll.user32.LockWorkStation()
-        return True
+        return bool(ctypes.windll.user32.LockWorkStation())
 
     for args in (
         ["loginctl", "lock-session"],
@@ -668,12 +676,13 @@ def lock_screen(keep_awake: KeepAwake | None = None) -> bool:
         ["osascript", "-e", 'tell application "System Events" to sleep'],
     ):
         try:
-            subprocess.run(
+            r = subprocess.run(
                 args, timeout=5, check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            return True
-        except Exception:
+            if r.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
     return False
 

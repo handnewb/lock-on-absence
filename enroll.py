@@ -39,6 +39,7 @@ CAMERA_INDEX = 0
 FRAME_WIDTH = 640
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = str(SCRIPT_DIR / "face_model.yml")
+RECOGNITION_THRESHOLD = 65  # documented default LBPH confidence threshold
 
 
 def _enroll_user(log: Logger, cap: cv2.VideoCapture, cascades: list,
@@ -148,33 +149,18 @@ def main() -> None:
     recognizer.write(args.output)
     log(f"Model saved to: {args.output}")
 
-    # ── Auto-calibrate recognition threshold ──
-    log("Calibrating recognition threshold...")
-    confidences = []
-    for sample in faces_only:
-        _label, conf = recognizer.predict(sample)
-        confidences.append(conf)
-    mean_conf = float(np.mean(confidences))
-    std_conf = float(np.std(confidences))
-    # Threshold = mean + 2.5σ, clamped between 55 and 95
-    calibrated = max(min(mean_conf + 2.5 * std_conf, 95.0), 55.0)
-    log(f"  Mean confidence: {mean_conf:.1f}")
-    log(f"  Std deviation:   {std_conf:.1f}")
-    log(f"  Calibrated threshold: {calibrated:.0f} (lower = stricter, default was 85)")
-
-    # Save metadata
+    # Save metadata (user names, sample count)
     try:
         meta_path = str(Path(args.output).with_suffix(".json"))
         meta = {
-            "threshold": round(calibrated, 1),
-            "mean_confidence": round(mean_conf, 1),
-            "std_confidence": round(std_conf, 1),
+            "threshold": RECOGNITION_THRESHOLD,  # documented default; tune via face_model.json
             "samples": len(faces_only),
             "users": {str(idx): name for idx, name in enumerate(user_names, start=1)},
         }
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
         log(f"Metadata saved to: {meta_path}")
+        log(f"Recognition threshold: {RECOGNITION_THRESHOLD} (default — edit face_model.json to tune)")
     except OSError as e:
         log(f"WARNING: Could not save metadata: {e}")
 

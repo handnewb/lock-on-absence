@@ -27,16 +27,22 @@ fi
 $PYTHON --version
 echo ""
 
-# 2. Dependencies
+# 2. Dependencies (venv to avoid PEP 668)
 echo "[2/4] Installing dependencies..."
-$PYTHON -m pip install -r requirements.txt --quiet 2>/dev/null || \
-    $PYTHON -m pip install -r requirements.txt --user --quiet
+VENV_DIR="$SCRIPT_DIR/.venv"
+if [ ! -d "$VENV_DIR" ]; then
+    $PYTHON -m venv "$VENV_DIR"
+fi
+"$VENV_DIR/bin/pip" install -r requirements.txt --quiet 2>/dev/null || \
+    "$VENV_DIR/bin/pip" install -r requirements.txt --user --quiet
 echo "OK"
 echo ""
 
+PYTHON_ABS="$VENV_DIR/bin/python"
+
 # 3. Webcam test
 echo "[3/4] Testing webcam..."
-$PYTHON -c "
+$PYTHON_ABS -c "
 import cv2
 found = False
 for i in range(3):
@@ -58,12 +64,16 @@ mkdir -p "$SERVICE_DIR"
 cat > "$SERVICE_DIR/lock-on-absence.service" << EOF
 [Unit]
 Description=Lock on Absence — auto screen lock
+After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=$PYTHON $SCRIPT_DIR/lock-on-absence.py
-Restart=on-failure
+ExecStart=$PYTHON_ABS $SCRIPT_DIR/lock-on-absence.py
+WorkingDirectory=$SCRIPT_DIR
+Restart=always
 RestartSec=10
+WatchdogSec=30
 
 [Install]
 WantedBy=default.target

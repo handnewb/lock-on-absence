@@ -31,7 +31,6 @@ import cv2
 import numpy as np
 
 from face_utils import (
-    BlinkDetector,
     BodyDetector,
     EventLogger,
     KeepAwake,
@@ -58,14 +57,12 @@ MIN_NEIGHBORS = 2           # more sensitive (streak confirmation prevents false
 MIN_FACE_SIZE = (30, 30)    # detects faces up to ~1.5m away
 FRAME_WIDTH = 640
 POST_LOCK_COOLDOWN = 30
-RECOGNITION_THRESHOLD = 60  # safe default — stricter than old 85; re-enroll for auto-calibration
+RECOGNITION_THRESHOLD = 65  # documented default LBPH confidence threshold
 
 # Paths
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL = str(SCRIPT_DIR / "face_model.yml")
 
-
-# ── Recognition ────────────────────────────────────────────────────
 
 def recognize_owner(
     recognizer: cv2.face.LBPHFaceRecognizer,
@@ -84,7 +81,13 @@ def recognize_owner(
     return result, confidence
 
 
-# ── Main ───────────────────────────────────────────────────────────
+def _do_lock(keep_awake_mgr, event_log, log, reason: str) -> None:
+    """Lock screen with return-code verification and SIEM logging."""
+    ok = lock_screen(keep_awake_mgr)
+    if ok:
+        return
+    log(f"ERROR: lock_screen() returned False — screen may NOT be locked! ({reason})")
+    event_log.lock_failed(reason)
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -154,6 +157,14 @@ def main() -> None:
         "--debug", action="store_true",
         help="Log face detection details (face count, confidence) for troubleshooting",
     )
+    parser.add_argument(
+        "--on-camera-failure", type=str, default="lock", choices=["lock", "warn"],
+        help="Action when camera is unavailable: lock (fail-closed) or warn only (default: lock)",
+    )
+    parser.add_argument(
+        "--any-face", action="store_true",
+        help="Accept ANY detected face as owner (INSECURE — disables intruder detection)",
+    )
     args = parser.parse_args()
 
     # ── Logger + Event log ──
@@ -197,14 +208,19 @@ def main() -> None:
             users_map = meta.get("users", {})
             if users_map:
                 log(f"Authorized users: {', '.join(users_map.values())}")
-            log(f"Recognition threshold: {recognition_threshold:.0f} (auto-calibrated from {meta.get('samples', '?')} samples)")
+            log(f"Recognition threshold: {recognition_threshold:.0f} (from face_model.json)")
         else:
-            log(f"WARNING: No face_model.json — using default threshold {recognition_threshold}")
+            log(f"Recognition threshold: {recognition_threshold} (default — run enroll.py to create model)")
             log("WARNING: Run 'python enroll.py --samples 50' to calibrate for your face!")
         log("Mode: OWNER RECOGNITION (only your face prevents lock)")
     else:
-        log(f"No face model at {args.model} — run 'python enroll.py' first.")
-        log("Mode: ANY FACE (any face prevents lock)")
+        if not getattr(args, 'any_face', False):
+            log("ERROR: No face model found and --any-face not set.")
+            log("Run 'python enroll.py --samples 50' to create your face model.")
+            log("Or use --any-face to accept ANY face (INSECURE — no intruder detection).")
+            sys.exit(2)
+        log("WARNING: --any-face mode — ANY face prevents lock (no intruder detection!)")
+        log("Mode: ANY FACE (insecure — run enroll.py to enable owner recognition)")
 
     # ── Webcam ──
     if args.stealth:
@@ -265,14 +281,10 @@ def main() -> None:
     elif recognizer:
         log("Anti-spoof: OFF (--anti-spoof-timeout 0)")
 
-    # Blink detection (liveness)
-    blink_detector = BlinkDetector()
-    if blink_detector.available:
-        log("Blink detection: ON (liveness proof)")
-    else:
-        log("Blink detection: unavailable (eye cascade missing)")
     try:
         _consecutive_fails = 0
+        _first_fail_time: float | None = None
+        _camera_fail_grace = 20.0  # seconds of tolerance before fail-closed
         _startup_grace = time.time() + 5  # 5s grace period before intruder checks
         while True:
             now = time.time()
@@ -280,11 +292,43 @@ def main() -> None:
             ret, frame = cap.read()
             if not ret or frame is None:
                 _consecutive_fails += 1
+                if _first_fail_time is None:
+                    _first_fail_time = now
+
+                # ALWAYS release keep-awake — no proof of presence, no suppression
+                if was_awake and keep_awake_mgr:
+                    keep_awake_mgr.disable()
+                    was_awake = False
+
+                # Try to reopen camera (outside any pause window)
+                if not args.stealth and _consecutive_fails % 3 == 0:
+                    try:
+                        _cap_obj = open_camera(args.camera, FRAME_WIDTH)
+                        cap = _cap_obj
+                        _consecutive_fails = 0
+                        _first_fail_time = None
+                        log("Camera recovered")
+                        continue
+                    except RuntimeError:
+                        pass
+
+                # Fail-closed watchdog: no signal for too long → lock
+                if (args.on_camera_failure == "lock"
+                        and _first_fail_time is not None
+                        and now - _first_fail_time > _camera_fail_grace):
+                    log(f">>> LOCKING (no camera signal for {now - _first_fail_time:.0f}s — fail-closed)")
+                    _do_lock(keep_awake_mgr, event_log, log, "camera-failure")
+                    event_log.camera_error(f"fail-closed lock after {now - _first_fail_time:.0f}s")
+                    locked_until = now + args.cooldown
+                    _first_fail_time = None
+                    log(f"Cooldown {args.cooldown}s...")
+
                 if _consecutive_fails == 1 or _consecutive_fails % 10 == 0:
                     log(f"Camera read failed ({_consecutive_fails}x) — retrying...")
                 time.sleep(2)
                 continue
             _consecutive_fails = 0
+            _first_fail_time = None
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             # Detect faces with current detector (YuNet or Haar)
@@ -359,8 +403,8 @@ def main() -> None:
                                     log(f">>> [DRY-RUN] Would lock NOW (anti-spoof: face static for {now - static_since:.0f}s)")
                                 else:
                                     log(f">>> LOCKING (anti-spoof: face static for {now - static_since:.0f}s — possible photo)")
-                                    lock_screen(keep_awake_mgr)
-                                event_log.spoof_lock(now - static_since) if not args.no_lock else None
+                                    _do_lock(keep_awake_mgr, event_log, log, "anti-spoof")
+                                    event_log.spoof_lock(now - static_since) if not args.no_lock else None
                                 locked_until = now + args.cooldown
                                 static_since = None
                                 log(f"Cooldown {args.cooldown}s...")
@@ -376,15 +420,6 @@ def main() -> None:
                 if recognizer is not None:
                     body_detector.update_ref(gray)
 
-                # Blink detection: feed face ROI to liveness checker
-                if owner_rect is not None and blink_detector.available:
-                    x, y, w, h = owner_rect
-                    face_roi = gray[max(0, y):min(gray.shape[0], y + h),
-                                    max(0, x):min(gray.shape[1], x + w)]
-                    blinked = blink_detector.update(face_roi, now)
-                    if blinked:
-                        log("Blink detected (liveness confirmed)")
-
                 if absence_start is not None:
                     log("Owner detected — timer reset")
 
@@ -393,7 +428,6 @@ def main() -> None:
                 # Reset anti-spoof tracking when no face is recognized
                 prev_face_center = None
                 static_since = None
-                blink_detector.reset()
 
                 if was_awake:
                     if keep_awake_mgr:
@@ -411,8 +445,8 @@ def main() -> None:
                                 log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
                             else:
                                 log(">>> LOCKING NOW (intruder confirmed)")
-                                lock_screen(keep_awake_mgr)
-                            event_log.intruder_lock() if not args.no_lock else None
+                                _do_lock(keep_awake_mgr, event_log, log, "intruder")
+                                event_log.intruder_lock() if not args.no_lock else None
                             locked_until = now + args.cooldown
                             intruder_streak = 0
                             absence_start = None
@@ -432,7 +466,7 @@ def main() -> None:
                                 log(f">>> [DRY-RUN] Would lock NOW (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
                             else:
                                 log(f">>> LOCKING (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
-                                lock_screen(keep_awake_mgr)
+                                _do_lock(keep_awake_mgr, event_log, log, "body-timeout")
                             event_log.body_timeout_lock(body_only_duration) if not args.no_lock else None
                             locked_until = now + args.cooldown
                             absence_start = None
@@ -462,7 +496,7 @@ def main() -> None:
                                 log(">>> [DRY-RUN] Would lock now (nobody present)")
                             else:
                                 log(">>> LOCKING (nobody present)")
-                                lock_screen(keep_awake_mgr)
+                                _do_lock(keep_awake_mgr, event_log, log, "absence")
                             event_log.absence_lock(now - absence_start) if not args.no_lock and absence_start else None
                             locked_until = now + args.cooldown
                             absence_start = None
