@@ -58,7 +58,7 @@ MIN_NEIGHBORS = 2           # more sensitive (streak confirmation prevents false
 MIN_FACE_SIZE = (30, 30)    # detects faces up to ~1.5m away
 FRAME_WIDTH = 640
 POST_LOCK_COOLDOWN = 30
-RECOGNITION_THRESHOLD = 85  # fallback default — overridden by face_model.json if present
+RECOGNITION_THRESHOLD = 60  # safe default — stricter than old 85; re-enroll for auto-calibration
 
 # Paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -198,7 +198,8 @@ def main() -> None:
                 log(f"Authorized users: {', '.join(users_map.values())}")
             log(f"Recognition threshold: {recognition_threshold:.0f} (auto-calibrated from {meta.get('samples', '?')} samples)")
         else:
-            log(f"Recognition threshold: {recognition_threshold} (default — re-run enroll.py for auto-calibration)")
+            log(f"WARNING: No face_model.json — using default threshold {recognition_threshold}")
+            log("WARNING: Run 'python enroll.py --samples 50' to calibrate for your face!")
         log("Mode: OWNER RECOGNITION (only your face prevents lock)")
     else:
         log(f"No face model at {args.model} — run 'python enroll.py' first.")
