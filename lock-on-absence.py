@@ -149,6 +149,10 @@ def main() -> None:
         "--yunet", action="store_true",
         help="Use YuNet DNN face detector (downloads model if needed, much better than Haar)",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Log face detection details (face count, confidence) for troubleshooting",
+    )
     args = parser.parse_args()
 
     # ── Logger + Event log ──
@@ -303,6 +307,11 @@ def main() -> None:
             else:
                 faces = detect_faces(detector, frame, SCALE_FACTOR, MIN_NEIGHBORS, MIN_FACE_SIZE)
             owner_present = False
+
+            # Debug: log face count every 30s
+            if args.debug and int(now) % 30 == 0 and int(now) != getattr(main, "_last_debug", 0):
+                log(f"DEBUG: {len(faces)} face(s) detected, owner_present={owner_present}")
+                main._last_debug = int(now)  # type: ignore[attr-defined]
 
             # ── Face detection ──
             if len(faces) == 0:
