@@ -270,10 +270,6 @@ def main() -> None:
         log("Blink detection: ON (liveness proof)")
     else:
         log("Blink detection: unavailable (eye cascade missing)")
-
-    # Pre-load eye cascade for face validation
-    _eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
-    _has_eye_cascade = not _eye_cascade.empty()
     try:
         _consecutive_fails = 0
         while True:
@@ -312,11 +308,6 @@ def main() -> None:
                         roi_mean = float(np.mean(face_roi))
                         if roi_std < 15 or roi_mean < 40:
                             continue  # too uniform or too dark — noise, not a real face
-                    # Eye check: a real face has detectable eyes
-                    if _has_eye_cascade:
-                        eyes = _eye_cascade.detectMultiScale(face_roi, 1.05, 2, minSize=(6, 4))
-                        if len(eyes) == 0:
-                            continue  # no eyes found — likely noise/tape, not a real face
                     is_owner, _conf = recognize_owner(recognizer, gray, rect, recognition_threshold)
                     if is_owner:
                         owner_present = True
