@@ -102,7 +102,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--users", type=str, default=None,
-        help="Comma-separated user names for multi-user enrollment (e.g. 'Everton,Ana')",
+        help="Comma-separated user names (e.g. 'Alice,Bob'). Without: interactive enrollment of 1 user",
+    )
+    parser.add_argument(
+        "--purge", action="store_true",
+        help="Delete face model and metadata (revoke all enrolled users)",
+    )
+    parser.add_argument(
+        "--no-consent", action="store_true",
+        help="Skip consent prompt (for automated enrollment; use with caution)",
     )
     args = parser.parse_args()
 
@@ -130,8 +138,16 @@ def main() -> None:
 
     # ── Enroll each user ──
     all_data: list = []
+    if len(user_names) > 1:
+        log(f"Multi-user enrollment: {len(user_names)} user(s)")
+        log(f"Samples per user: {samples_per}")
+        log("")
+
     for idx, name in enumerate(user_names, start=1):
-        user_data = _enroll_user(log, cap, cascades, idx, name, args.samples)
+        log(f"=== User {idx}: {name} ===")
+        if idx > 1:
+            log("(5s pause — switch users now)")
+            time.sleep(5)
         all_data.extend(user_data)
 
     cap.release()

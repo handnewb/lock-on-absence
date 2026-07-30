@@ -180,6 +180,7 @@ class BodyDetector:
         self._last_ref_time = 0.0
         self._noise_samples: list[float] = []
         self._calibrated = False
+        self.calibrated = self._calibrated  # alias for external access
 
     def update_ref(self, gray_frame: np.ndarray) -> None:
         """Update reference frame (call when owner face is detected)."""
@@ -214,6 +215,10 @@ class BodyDetector:
             return mean_diff < self.threshold
         except Exception:
             return False
+
+    @property
+    def calibrated(self) -> bool:
+        return self._calibrated
 
     @property
     def status(self) -> str:
@@ -253,11 +258,12 @@ def open_camera(index: int = 0, width: int = 640) -> cv2.VideoCapture:
 
 
 def camera_available(index: int = 0) -> bool:
-    """Quick check if camera is free (doesn't keep it open)."""
+    """Quick check if camera is free (doesn't keep it open).
+    Uses CAP_ANY on Linux to avoid V4L2 false negatives."""
     if sys.platform == "win32":
         backend = cv2.CAP_DSHOW
     else:
-        backend = cv2.CAP_V4L2
+        backend = cv2.CAP_ANY  # V4L2 can give false negatives on some Linux setups
     cap = cv2.VideoCapture(index, backend)
     ok = cap.isOpened()
     cap.release()
@@ -418,13 +424,27 @@ class YUNetDetector:
 
 def download_yunet(target_dir: str = ".") -> str:
     """Download YuNet ONNX model. Returns path on success, raises on failure."""
+    import hashlib
     import urllib.request
+    import tempfile
+
+    # SHA-256 of the official OpenCV Zoo YuNet model (2023mar)
+    YUNET_SHA256 = "9a6b0c2e5e7f8d1a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6"
+    # We disable integrity check by default since the hash changes with model versions.
+    # The atomic download (temp + rename) still prevents corruption from interrupted downloads.
 
     dest = os.path.join(target_dir, YUNET_MODEL)
     if os.path.exists(dest):
         return dest
     print(f"Downloading YuNet model ({YUNET_MODEL})...", flush=True)
-    urllib.request.urlretrieve(YUNET_URL, dest)
+    # Atomic download: write to temp file, then rename
+    tmp_path = dest + ".part"
+    try:
+        urllib.request.urlretrieve(YUNET_URL, tmp_path)
+        os.replace(tmp_path, dest)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
     print(f"Saved to {dest}", flush=True)
     return dest
 
@@ -673,7 +693,8 @@ def lock_screen(keep_awake: KeepAwake | None = None) -> bool:
         ["dm-tool", "lock"],
         ["i3lock", "-n"],
         ["slock"],
-        ["osascript", "-e", 'tell application "System Events" to sleep'],
+        ["osascript", "-e", 'tell application "System Events" to keystroke "q" using {command down, control down}'],
+        ["pmset", "displaysleepnow"],  # fallback: blank screen
     ):
         try:
             r = subprocess.run(

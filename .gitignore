@@ -3,6 +3,7 @@ __pycache__/
 face_model.yml
 face_model.json
 lock-events.json
+watchdog_heartbeat.txt
 *.onnx
 *.egg-info/
 dist/

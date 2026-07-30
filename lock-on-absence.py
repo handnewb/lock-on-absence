@@ -354,8 +354,9 @@ def main() -> None:
                 owner_present = True  # any face = owner
                 owner_rect = faces[0] if faces else None
 
-            # Debug: log face count every 30s (after recognition)
-            if args.debug and int(now) % 30 == 0 and int(now) != getattr(main, "_last_debug", 0):
+            # Debug: log face count at most every 30s (tracks last emit time)
+            _last_db = getattr(main, "_last_debug", 0.0)
+            if args.debug and now - _last_db >= 28:  # ~30s with tolerance
                 extra = ""
                 if faces and recognizer:
                     _x, _y, _w, _h = faces[0]
@@ -363,7 +364,7 @@ def main() -> None:
                     _l, _c = recognizer.predict(_roi)
                     extra = f", conf={_c:.0f}, thresh={recognition_threshold}"
                 log(f"DEBUG: {len(faces)} face(s), owner={owner_present}{extra}")
-                main._last_debug = int(now)  # type: ignore[attr-defined]
+                main._last_debug = now  # type: ignore[attr-defined]
 
             # ── Cooldown after lock ──
             if locked_until and now < locked_until:
@@ -381,10 +382,17 @@ def main() -> None:
                 absence_start = None
                 locked_until = 0.0
 
-                # Heartbeat: confirm alive every 60s
-                if int(now) % 60 == 0 and int(now) != getattr(main, "_last_heartbeat", 0):
+                # Heartbeat: confirm alive at most every 60s (tracks last emit time)
+                _last_hb = getattr(main, "_last_heartbeat", 0.0)
+                if now - _last_hb >= 58:  # ~60s with tolerance
                     log("Heartbeat — owner present, system active")
-                    main._last_heartbeat = int(now)  # type: ignore[attr-defined]
+                    main._last_heartbeat = now  # type: ignore[attr-defined]
+                    # Write watchdog heartbeat file
+                    try:
+                        with open(os.path.join(str(SCRIPT_DIR), "watchdog_heartbeat.txt"), "w") as _wfh:
+                            _wfh.write(str(now))
+                    except OSError:
+                        pass
 
                 # Anti-spoof: check face movement (photo/video has zero micro-movement)
                 if owner_rect is not None and anti_spoof_timeout > 0 and anti_spoof_timeout != float("inf"):
@@ -401,10 +409,11 @@ def main() -> None:
                             elif now - static_since > anti_spoof_timeout:
                                 if args.no_lock:
                                     log(f">>> [DRY-RUN] Would lock NOW (anti-spoof: face static for {now - static_since:.0f}s)")
+                                    event_log.spoof_lock(now - static_since)  # SIEM even in dry-run
                                 else:
                                     log(f">>> LOCKING (anti-spoof: face static for {now - static_since:.0f}s — possible photo)")
                                     _do_lock(keep_awake_mgr, event_log, log, "anti-spoof")
-                                    event_log.spoof_lock(now - static_since) if not args.no_lock else None
+                                    event_log.spoof_lock(now - static_since)
                                 locked_until = now + args.cooldown
                                 static_since = None
                                 log(f"Cooldown {args.cooldown}s...")
@@ -419,6 +428,10 @@ def main() -> None:
                 # Update body reference frame periodically (only when face IS recognized)
                 if recognizer is not None:
                     body_detector.update_ref(gray)
+                    # Complete body detector calibration with OWNER present
+                    if not body_detector.calibrated:
+                        body_detector.complete_calibration()
+                        log(f"Body detector calibrated — threshold={body_detector._threshold:.1f}")
 
                 if absence_start is not None:
                     log("Owner detected — timer reset")
@@ -443,10 +456,11 @@ def main() -> None:
                         if intruder_streak >= 2:
                             if args.no_lock:
                                 log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
+                                event_log.intruder_lock()  # always write SIEM even in dry-run
                             else:
                                 log(">>> LOCKING NOW (intruder confirmed)")
                                 _do_lock(keep_awake_mgr, event_log, log, "intruder")
-                                event_log.intruder_lock() if not args.no_lock else None
+                                event_log.intruder_lock()
                             locked_until = now + args.cooldown
                             intruder_streak = 0
                             absence_start = None
@@ -464,10 +478,11 @@ def main() -> None:
                             # Too long without face — lock for security
                             if args.no_lock:
                                 log(f">>> [DRY-RUN] Would lock NOW (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
+                                event_log.body_timeout_lock(body_only_duration)
                             else:
                                 log(f">>> LOCKING (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
                                 _do_lock(keep_awake_mgr, event_log, log, "body-timeout")
-                            event_log.body_timeout_lock(body_only_duration) if not args.no_lock else None
+                                event_log.body_timeout_lock(body_only_duration)
                             locked_until = now + args.cooldown
                             absence_start = None
                             _body_detect_active = False
@@ -494,10 +509,11 @@ def main() -> None:
                         elif now - absence_start >= args.delay:
                             if args.no_lock:
                                 log(">>> [DRY-RUN] Would lock now (nobody present)")
+                                event_log.absence_lock(now - absence_start) if absence_start else None
                             else:
                                 log(">>> LOCKING (nobody present)")
                                 _do_lock(keep_awake_mgr, event_log, log, "absence")
-                            event_log.absence_lock(now - absence_start) if not args.no_lock and absence_start else None
+                                event_log.absence_lock(now - absence_start) if absence_start else None
                             locked_until = now + args.cooldown
                             absence_start = None
                             log(f"Cooldown {args.cooldown}s...")
