@@ -308,11 +308,6 @@ def main() -> None:
                 faces = detect_faces(detector, frame, SCALE_FACTOR, MIN_NEIGHBORS, MIN_FACE_SIZE)
             owner_present = False
 
-            # Debug: log face count every 30s
-            if args.debug and int(now) % 30 == 0 and int(now) != getattr(main, "_last_debug", 0):
-                log(f"DEBUG: {len(faces)} face(s) detected, owner_present={owner_present}")
-                main._last_debug = int(now)  # type: ignore[attr-defined]
-
             # ── Face detection ──
             if len(faces) == 0:
                 owner_present = False
@@ -328,6 +323,11 @@ def main() -> None:
             else:
                 owner_present = True  # any face = owner
                 owner_rect = faces[0] if faces else None
+
+            # Debug: log face count every 30s (after recognition)
+            if args.debug and int(now) % 30 == 0 and int(now) != getattr(main, "_last_debug", 0):
+                log(f"DEBUG: {len(faces)} face(s), owner={owner_present}")
+                main._last_debug = int(now)  # type: ignore[attr-defined]
 
             # ── Cooldown after lock ──
             if locked_until and now < locked_until:
