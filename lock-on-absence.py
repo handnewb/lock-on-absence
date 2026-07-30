@@ -308,6 +308,12 @@ def main() -> None:
                         roi_mean = float(np.mean(face_roi))
                         if roi_std < 15 or roi_mean < 40:
                             continue  # too uniform or too dark — noise, not a real face
+                    # Eye check: a real face has detectable eyes
+                    _eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+                    if not _eye_cascade.empty():
+                        eyes = _eye_cascade.detectMultiScale(face_roi, 1.1, 3, minSize=(10, 8))
+                        if len(eyes) == 0:
+                            continue  # no eyes found — likely noise/tape, not a real face
                     is_owner, _conf = recognize_owner(recognizer, gray, rect, recognition_threshold)
                     if is_owner:
                         owner_present = True
