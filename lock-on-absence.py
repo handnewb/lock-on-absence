@@ -319,7 +319,13 @@ def main() -> None:
 
             # Debug: log face count every 30s (after recognition)
             if args.debug and int(now) % 30 == 0 and int(now) != getattr(main, "_last_debug", 0):
-                log(f"DEBUG: {len(faces)} face(s), owner={owner_present}")
+                extra = ""
+                if faces and recognizer:
+                    _x, _y, _w, _h = faces[0]
+                    _roi = cv2.resize(gray[_y:_y+_h, _x:_x+_w], (200, 200))
+                    _l, _c = recognizer.predict(_roi)
+                    extra = f", conf={_c:.0f}, thresh={recognition_threshold}"
+                log(f"DEBUG: {len(faces)} face(s), owner={owner_present}{extra}")
                 main._last_debug = int(now)  # type: ignore[attr-defined]
 
             # ── Cooldown after lock ──
