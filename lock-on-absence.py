@@ -299,15 +299,6 @@ def main() -> None:
             elif recognizer is not None:
                 owner_rect = None
                 for rect in faces:
-                    x, y, w, h = rect
-                    # Sanity check: face ROI must have texture AND brightness (not noise/black)
-                    face_roi = gray[max(0, y):min(gray.shape[0], y + h),
-                                    max(0, x):min(gray.shape[1], x + w)]
-                    if face_roi.size > 0:
-                        roi_std = float(np.std(face_roi))
-                        roi_mean = float(np.mean(face_roi))
-                        if roi_std < 15 or roi_mean < 40:
-                            continue  # too uniform or too dark — noise, not a real face
                     is_owner, _conf = recognize_owner(recognizer, gray, rect, recognition_threshold)
                     if is_owner:
                         owner_present = True
