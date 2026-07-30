@@ -11,7 +11,6 @@ it locks the screen.  This catches crashes, zombs, and kills.
 import os
 import sys
 import time
-import ctypes
 
 HEARTBEAT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "watchdog_heartbeat.txt")
@@ -22,6 +21,7 @@ CHECK_INTERVAL = 30  # seconds between checks
 def lock_now() -> None:
     """Lock the workstation immediately."""
     if sys.platform == "win32":
+        import ctypes
         ctypes.windll.user32.LockWorkStation()
     else:
         import subprocess

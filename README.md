@@ -145,6 +145,25 @@ python lock-on-absence.py --siem lock-events.json
 | `--purge` | — | Delete face model and metadata, revoke all enrolled users |
 | `--no-consent` | — | Skip privacy consent prompt (automated enrollment) |
 
+### Multi‑user enrollment
+
+To enroll multiple users (e.g., family members or co‑workers sharing the desk):
+
+```bash
+# Enroll Alice and Bob in one pass
+python enroll.py --users Alice,Bob --samples 50
+
+# Run with Alice's model
+python lock-on-absence.py --model face_model_Alice.json
+
+# Run with Bob's model
+python lock-on-absence.py --model face_model_Bob.json
+```
+
+Each user gets a separate `face_model_<name>.yml` + `face_model_<name>.json` pair.
+Pass `--model` to select which face unlocks the screen.  
+Users not selected by `--model` are **ignored** — they count as non-owner faces (intruder).
+
 ---
 
 ## SIEM / event log

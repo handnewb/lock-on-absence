@@ -47,6 +47,14 @@ from face_utils import (
     lock_screen,
     open_camera,
 )
+from presence_state_machine import (
+    PresenceStateMachine,
+    Config as PSMConfig,
+    Observation,
+    State as PSMState,
+    Decision,
+    Reason,
+)
 
 # ── Defaults (tunable via CLI) ─────────────────────────────────────
 CHECK_INTERVAL = 1.5
@@ -167,6 +175,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # ── Mutex: --any-face and --model conflict ──
+    if args.model and getattr(args, 'any_face', False):
+        parser.error("--any-face and --model are mutually exclusive. Use --model for owner recognition or --any-face for open access.")
+
     # ── Logger + Event log ──
     log = Logger(args.log_file)
     event_log = EventLogger(args.event_log, args.siem)
@@ -224,6 +236,8 @@ def main() -> None:
 
     # ── Webcam ──
     if args.stealth:
+        if not camera_available(args.camera):
+            log(f"WARNING: Camera index {args.camera} not detected now — will retry each frame (stealth mode)")
         cap = StealthCamera(args.camera, FRAME_WIDTH)
         log("Camera mode: STEALTH (open/close per frame — LED blinks instead of solid)")
         # StealthCamera has no permanent VideoCapture; read() opens/closes per cycle
@@ -262,20 +276,30 @@ def main() -> None:
     log("Press Ctrl+C to stop")
 
     # ── State machine ──
-    absence_start: float | None = None
-    locked_until: float = 0.0
+    psm_config = PSMConfig(
+        absence_delay=float(args.delay),
+        max_body_only=float(args.max_body_only) if recognizer else float("inf"),
+        intruder_streak=2,
+        cooldown=float(args.cooldown),
+        camera_fail_grace=20.0,
+        anti_spoof_timeout=float(args.anti_spoof_timeout) if recognizer else float("inf"),
+    )
+    psm = PresenceStateMachine(psm_config)
+    psm_state = PSMState()
+    _previous_decision = (Decision.KEEP, Reason.NONE)
+
+    # Legacy state vars (side effects that still need tracking)
     was_awake = False
-    intruder_streak = 0
-    last_face_time: float = time.time()  # assume owner starts present
+    last_face_time: float = time.time()
     max_body_only: float = float(args.max_body_only) if recognizer else float("inf")
+    prev_face_center: tuple[float, float] | None = None
+    static_since: float | None = None
 
     # Track body-detect status for one-time log messages
     _body_detect_active = False
 
     # Anti-spoof: track face movement (photo/video attacks)
     anti_spoof_timeout = float(args.anti_spoof_timeout) if recognizer else float("inf")
-    prev_face_center: tuple[float, float] | None = None
-    static_since: float | None = None
     if anti_spoof_timeout > 0 and anti_spoof_timeout != float("inf"):
         log(f"Anti-spoof: ON (max {anti_spoof_timeout:.0f}s static face -> lock)")
     elif recognizer:
@@ -283,8 +307,6 @@ def main() -> None:
 
     try:
         _consecutive_fails = 0
-        _first_fail_time: float | None = None
-        _camera_fail_grace = 20.0  # seconds of tolerance before fail-closed
         _startup_grace = time.time() + 5  # 5s grace period before intruder checks
         while True:
             now = time.time()
@@ -292,8 +314,8 @@ def main() -> None:
             ret, frame = cap.read()
             if not ret or frame is None:
                 _consecutive_fails += 1
-                if _first_fail_time is None:
-                    _first_fail_time = now
+                if psm_state.first_camera_fail is None:
+                    psm_state.first_camera_fail = now
 
                 # ALWAYS release keep-awake — no proof of presence, no suppression
                 if was_awake and keep_awake_mgr:
@@ -306,29 +328,32 @@ def main() -> None:
                         _cap_obj = open_camera(args.camera, FRAME_WIDTH)
                         cap = _cap_obj
                         _consecutive_fails = 0
-                        _first_fail_time = None
+                        psm_state.first_camera_fail = None
                         log("Camera recovered")
                         continue
                     except RuntimeError:
                         pass
 
-                # Fail-closed watchdog: no signal for too long → lock
-                if (args.on_camera_failure == "lock"
-                        and _first_fail_time is not None
-                        and now - _first_fail_time > _camera_fail_grace):
-                    log(f">>> LOCKING (no camera signal for {now - _first_fail_time:.0f}s — fail-closed)")
-                    _do_lock(keep_awake_mgr, event_log, log, "camera-failure")
-                    event_log.camera_error(f"fail-closed lock after {now - _first_fail_time:.0f}s")
-                    locked_until = now + args.cooldown
-                    _first_fail_time = None
+                obs = Observation(
+                    t=now, faces=0, owner_recognized=False,
+                    scene_unchanged=False, camera_ok=False,
+                )
+                decision, reason = psm.step(obs, psm_state)
+
+                if decision == Decision.LOCK:
+                    if reason == Reason.CAMERA_FAILURE:
+                        log(f">>> LOCKING (no camera signal for — fail-closed)")
+                        _do_lock(keep_awake_mgr, event_log, log, "camera-failure")
+                        event_log.camera_error(f"fail-closed lock")
                     log(f"Cooldown {args.cooldown}s...")
 
                 if _consecutive_fails == 1 or _consecutive_fails % 10 == 0:
                     log(f"Camera read failed ({_consecutive_fails}x) — retrying...")
                 time.sleep(2)
                 continue
+
             _consecutive_fails = 0
-            _first_fail_time = None
+            psm_state.first_camera_fail = None
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             # Detect faces with current detector (YuNet or Haar)
@@ -354,9 +379,21 @@ def main() -> None:
                 owner_present = True  # any face = owner
                 owner_rect = faces[0] if faces else None
 
-            # Debug: log face count at most every 30s (tracks last emit time)
+            # Build Observation for state machine
+            scene_unchanged = (recognizer is not None
+                               and body_detector.present(gray))
+            obs = Observation(
+                t=now,
+                faces=len(faces),
+                owner_recognized=owner_present,
+                scene_unchanged=scene_unchanged,
+                camera_ok=True,
+            )
+            decision, reason = psm.step(obs, psm_state)
+
+            # Debug: log face count at most every 30s
             _last_db = getattr(main, "_last_debug", 0.0)
-            if args.debug and now - _last_db >= 28:  # ~30s with tolerance
+            if args.debug and now - _last_db >= 28:
                 extra = ""
                 if faces and recognizer:
                     _x, _y, _w, _h = faces[0]
@@ -366,28 +403,20 @@ def main() -> None:
                 log(f"DEBUG: {len(faces)} face(s), owner={owner_present}{extra}")
                 main._last_debug = now  # type: ignore[attr-defined]
 
-            # ── Cooldown after lock ──
-            if locked_until and now < locked_until:
-                time.sleep(args.check_interval)
-                continue
-
-            # ── Owner present ──
-            if owner_present:
-                intruder_streak = 0
+            # ── Act on decision ──
+            if decision == Decision.KEEP and reason == Reason.NONE and owner_present:
+                # ── Owner present (happy path) ──
                 if _body_detect_active:
                     log("Owner face detected — body-detect disengaged")
                     _body_detect_active = False
 
-                last_face_time = now  # reset re-verification timer
-                absence_start = None
-                locked_until = 0.0
+                last_face_time = now
 
-                # Heartbeat: confirm alive at most every 60s (tracks last emit time)
+                # Heartbeat: confirm alive at most every 60s
                 _last_hb = getattr(main, "_last_heartbeat", 0.0)
-                if now - _last_hb >= 58:  # ~60s with tolerance
+                if now - _last_hb >= 58:
                     log("Heartbeat — owner present, system active")
-                    main._last_heartbeat = now  # type: ignore[attr-defined]
-                    # Write watchdog heartbeat file
+                    main._last_heartbeat = now
                     try:
                         with open(os.path.join(str(SCRIPT_DIR), "watchdog_heartbeat.txt"), "w") as _wfh:
                             _wfh.write(str(now))
@@ -398,125 +427,119 @@ def main() -> None:
                 if owner_rect is not None and anti_spoof_timeout > 0 and anti_spoof_timeout != float("inf"):
                     x, y, w, h = owner_rect
                     cx, cy = x + w / 2.0, y + h / 2.0
-                    # Use 1.5% of face width as threshold (~3px for 200px face, ~6px for 400px)
                     movement_threshold = max(w * 0.015, 4.0)
                     if prev_face_center is not None:
                         dx = abs(cx - prev_face_center[0])
                         dy = abs(cy - prev_face_center[1])
-                        if dx < movement_threshold and dy < movement_threshold:  # essentially static
+                        if dx < movement_threshold and dy < movement_threshold:
                             if static_since is None:
                                 static_since = now
                             elif now - static_since > anti_spoof_timeout:
                                 if args.no_lock:
                                     log(f">>> [DRY-RUN] Would lock NOW (anti-spoof: face static for {now - static_since:.0f}s)")
-                                    event_log.spoof_lock(now - static_since)  # SIEM even in dry-run
                                 else:
                                     log(f">>> LOCKING (anti-spoof: face static for {now - static_since:.0f}s — possible photo)")
                                     _do_lock(keep_awake_mgr, event_log, log, "anti-spoof")
                                     event_log.spoof_lock(now - static_since)
-                                locked_until = now + args.cooldown
+                                psm_state.last_lock_time = now
                                 static_since = None
                                 log(f"Cooldown {args.cooldown}s...")
                         else:
-                            static_since = None  # moved — reset
+                            static_since = None
                     prev_face_center = (cx, cy)
 
                 if keep_awake_mgr and not was_awake:
                     keep_awake_mgr.enable()
                     was_awake = True
 
-                # Update body reference frame periodically (only when face IS recognized)
+                # Update body reference frame periodically
                 if recognizer is not None:
                     body_detector.update_ref(gray)
-                    # Complete body detector calibration with OWNER present
                     if not body_detector.calibrated:
                         body_detector.complete_calibration()
                         log(f"Body detector calibrated — threshold={body_detector._threshold:.1f}")
 
-                if absence_start is not None:
+                if psm_state.absence_start is not None:
                     log("Owner detected — timer reset")
 
-            # ── Owner NOT present ──
+            elif decision == Decision.LOCK:
+                # ── Lock decision from state machine ──
+                if reason == Reason.INTRUDER:
+                    if args.no_lock:
+                        log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
+                        event_log.intruder_lock()
+                    else:
+                        log(">>> LOCKING NOW (intruder confirmed)")
+                        _do_lock(keep_awake_mgr, event_log, log, "intruder")
+                        event_log.intruder_lock()
+                    _body_detect_active = False
+                    log(f"Cooldown {args.cooldown}s...")
+                elif reason == Reason.ABSENCE:
+                    if args.no_lock:
+                        log(">>> [DRY-RUN] Would lock now (nobody present)")
+                        event_log.absence_lock(psm_config.absence_delay)
+                    else:
+                        log(">>> LOCKING (nobody present)")
+                        _do_lock(keep_awake_mgr, event_log, log, "absence")
+                        event_log.absence_lock(psm_config.absence_delay)
+                    log(f"Cooldown {args.cooldown}s...")
+                elif reason == Reason.BODY_TIMEOUT:
+                    body_only_duration = now - last_face_time
+                    if args.no_lock:
+                        log(f">>> [DRY-RUN] Would lock NOW (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
+                        event_log.body_timeout_lock(body_only_duration)
+                    else:
+                        log(f">>> LOCKING (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
+                        _do_lock(keep_awake_mgr, event_log, log, "body-timeout")
+                        event_log.body_timeout_lock(body_only_duration)
+                    _body_detect_active = False
+                    log(f"Cooldown {args.cooldown}s...")
+                elif reason == Reason.CAMERA_FAILURE:
+                    log(">>> LOCKING (camera failure — fail-closed)")
+                    _do_lock(keep_awake_mgr, event_log, log, "camera-failure")
+                    event_log.camera_error("fail-closed lock")
+                    log(f"Cooldown {args.cooldown}s...")
+
+                # Reset side-effect tracking on lock
+                if was_awake and keep_awake_mgr:
+                    keep_awake_mgr.disable()
+                    was_awake = False
+                prev_face_center = None
+                static_since = None
+                _body_detect_active = False
+
+            elif reason == Reason.BODY_TIMEOUT or (
+                    not owner_present and recognizer is not None
+                    and psm_state.absence_start is None
+                    and scene_unchanged
+            ):
+                # ── Body detection active (no face, body present) ──
+                if not _body_detect_active:
+                    body_only_duration = now - last_face_time
+                    remaining = max_body_only - body_only_duration
+                    log(f"No face — body present, re-verify in {remaining:.0f}s")
+                    _body_detect_active = True
+                if psm_state.absence_start is not None:
+                    psm_state.absence_start = None
+                if keep_awake_mgr and not was_awake:
+                    keep_awake_mgr.enable()
+                    was_awake = True
+
             else:
-                # Reset anti-spoof tracking when no face is recognized
+                # ── No owner, no body, not locked — waiting ──
+                if was_awake and keep_awake_mgr:
+                    keep_awake_mgr.disable()
+                    was_awake = False
                 prev_face_center = None
                 static_since = None
 
-                if was_awake:
-                    if keep_awake_mgr:
-                        keep_awake_mgr.disable()
-                    was_awake = False
+                if _body_detect_active:
+                    log("Body no longer detected")
+                    _body_detect_active = False
 
-                # Face detected but NOT owner → intruder check (after grace period)
-                if len(faces) > 0 and recognizer is not None:
-                    if now < _startup_grace:
-                        pass  # grace period — don't lock while user is settling in
-                    else:
-                        intruder_streak += 1
-                        if intruder_streak >= 2:
-                            if args.no_lock:
-                                log(">>> [DRY-RUN] Would lock NOW (intruder confirmed)")
-                                event_log.intruder_lock()  # always write SIEM even in dry-run
-                            else:
-                                log(">>> LOCKING NOW (intruder confirmed)")
-                                _do_lock(keep_awake_mgr, event_log, log, "intruder")
-                                event_log.intruder_lock()
-                            locked_until = now + args.cooldown
-                            intruder_streak = 0
-                            absence_start = None
-                            _body_detect_active = False
-                            log(f"Cooldown {args.cooldown}s...")
-                else:
-                    # No face at all — check body presence
-                    intruder_streak = 0
-
-                    if recognizer is not None and body_detector.present(gray):
-                        # Body still in chair — but require periodic face re-verification
-                        body_only_duration = now - last_face_time
-
-                        if body_only_duration > max_body_only:
-                            # Too long without face — lock for security
-                            if args.no_lock:
-                                log(f">>> [DRY-RUN] Would lock NOW (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
-                                event_log.body_timeout_lock(body_only_duration)
-                            else:
-                                log(f">>> LOCKING (body-only timeout: {body_only_duration:.0f}s > {max_body_only:.0f}s)")
-                                _do_lock(keep_awake_mgr, event_log, log, "body-timeout")
-                                event_log.body_timeout_lock(body_only_duration)
-                            locked_until = now + args.cooldown
-                            absence_start = None
-                            _body_detect_active = False
-                            log(f"Cooldown {args.cooldown}s...")
-                        else:
-                            if not _body_detect_active:
-                                log(f"No face — body present, re-verify in {max_body_only - body_only_duration:.0f}s")
-                                _body_detect_active = True
-                            if absence_start is not None:
-                                absence_start = None
-                            if keep_awake_mgr and not was_awake:
-                                keep_awake_mgr.enable()
-                                was_awake = True
-                            # NOTE: body reference is NOT updated here — only when face IS recognized
-                            # This prevents an attacker's body from becoming the new reference
-                    else:
-                        if _body_detect_active:
-                            log("Body no longer detected")
-                            _body_detect_active = False
-
-                        if absence_start is None:
-                            absence_start = now
-                            log(f"No face — waiting {args.delay}s...")
-                        elif now - absence_start >= args.delay:
-                            if args.no_lock:
-                                log(">>> [DRY-RUN] Would lock now (nobody present)")
-                                event_log.absence_lock(now - absence_start) if absence_start else None
-                            else:
-                                log(">>> LOCKING (nobody present)")
-                                _do_lock(keep_awake_mgr, event_log, log, "absence")
-                                event_log.absence_lock(now - absence_start) if absence_start else None
-                            locked_until = now + args.cooldown
-                            absence_start = None
-                            log(f"Cooldown {args.cooldown}s...")
+                if reason == Reason.NONE and psm_state.absence_start is not None and faces == 0:
+                    # Still within grace period — log only once
+                    pass
 
             time.sleep(args.check_interval)
 

@@ -312,81 +312,11 @@ class StealthCamera:
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Blink detection (liveness proof — anti-spoofing)
-#  NOTE: removed in v4.0 — see C5 in adversarial review.
+#  REMOVED in v4.0 — see C5 in adversarial review.
 #  The eye cascade cannot detect blinks (trained on open eyes only),
 #  and the movement-based check had unacceptable false positives.
 #  Proper liveness requires MediaPipe landmarks or active challenge.
 # ═══════════════════════════════════════════════════════════════════════
-
-_EYE_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_eye.xml"
-# Eye Aspect Ratio: (vertical distances) / (horizontal distance)
-# Drops sharply during blink — typical threshold ~0.2
-
-
-class BlinkDetector:
-    """
-    Detects blinks using eye aspect ratio (EAR).
-    A real person blinks every 2-10 seconds. A photo never blinks.
-    """
-
-    def __init__(self, ear_threshold: float = 0.22, blink_timeout: float = 15.0):
-        self.ear_threshold = ear_threshold
-        self.blink_timeout = blink_timeout
-        self._eye_cascade: cv2.CascadeClassifier | None = None
-        if os.path.exists(_EYE_CASCADE_PATH):
-            c = cv2.CascadeClassifier(_EYE_CASCADE_PATH)
-            if not c.empty():
-                self._eye_cascade = c
-        self._last_blink_time: float = 0.0
-        self._blink_detected: bool = False
-
-    @property
-    def available(self) -> bool:
-        return self._eye_cascade is not None
-
-    def update(self, gray_face_roi: np.ndarray, now: float) -> bool:
-        """
-        Process a face region. Returns True if a blink was just detected.
-        Call this each frame when owner is present.
-        """
-        if not self.available:
-            return False
-        try:
-            eyes = self._eye_cascade.detectMultiScale(gray_face_roi, 1.1, 3, minSize=(15, 10))
-        except Exception:
-            return False
-
-        if len(eyes) < 2:
-            return False  # need both eyes visible
-
-        # Take the best 2 eye candidates (by y-position for alignment)
-        eyes_sorted = sorted(eyes, key=lambda e: e[1])[:2]
-        ears = []
-        for (ex, ey, ew, eh) in eyes_sorted:
-            # Vertical eye landmarks approximation from bounding box
-            ear = eh / max(ew, 1)  # simplified EAR: height/width ratio
-            ears.append(ear)
-
-        # Blink: both eyes narrow (low EAR)
-        if all(e < self.ear_threshold for e in ears):
-            if not self._blink_detected:
-                self._blink_detected = True
-                self._last_blink_time = now
-                return True
-        else:
-            self._blink_detected = False
-
-        return False
-
-    def time_since_blink(self, now: float) -> float:
-        """Seconds since last detected blink."""
-        if self._last_blink_time == 0.0:
-            return float("inf")
-        return now - self._last_blink_time
-
-    def reset(self) -> None:
-        self._last_blink_time = 0.0
-        self._blink_detected = False
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -427,14 +357,13 @@ class YUNetDetector:
 
 def download_yunet(target_dir: str = ".") -> str:
     """Download YuNet ONNX model. Returns path on success, raises on failure."""
-    import hashlib
     import urllib.request
     import tempfile
 
-    # SHA-256 of the official OpenCV Zoo YuNet model (2023mar)
-    YUNET_SHA256 = "9a6b0c2e5e7f8d1a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6"
-    # We disable integrity check by default since the hash changes with model versions.
-    # The atomic download (temp + rename) still prevents corruption from interrupted downloads.
+    # NOTE: Integrity check via SHA-256 was considered but the model hash
+    # changes with OpenCV Zoo versions.  The atomic download (temp + rename)
+    # still prevents corruption.  No cryptographic verification is performed.
+    # See OpenCV Zoo for official hashes if needed.
 
     dest = os.path.join(target_dir, YUNET_MODEL)
     if os.path.exists(dest):
@@ -599,6 +528,13 @@ else:
     _SetThreadExecutionState = None
 
 
+# Pre-flight: detect systemd-inhibit availability on Linux
+_have_systemd_inhibit: bool = False
+if sys.platform == "linux":
+    import shutil
+    _have_systemd_inhibit = shutil.which("systemd-inhibit") is not None
+
+
 class KeepAwake:
     """
     Cross-platform keep-awake: prevents system sleep/lock while owner present.
@@ -626,32 +562,38 @@ class KeepAwake:
             return True
 
         # Linux: systemd-inhibit with a long-lived sleep process
-        try:
-            self._proc = subprocess.Popen(
-                ["systemd-inhibit", "--what=idle:sleep",
-                 "--why=Lock on Absence: owner present",
-                 "--who=lock-on-absence",
-                 "sleep", "infinity"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self._active = True
-            return True
-        except Exception:
-            pass
+        if sys.platform == "linux":
+            if not _have_systemd_inhibit:
+                self._log and self._log("Keep-awake: systemd-inhibit not found — install systemd or use --no-keep-awake")
+                return False
+            try:
+                self._proc = subprocess.Popen(
+                    ["systemd-inhibit", "--what=idle:sleep",
+                     "--why=Lock on Absence: owner present",
+                     "--who=lock-on-absence",
+                     "sleep", "infinity"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._active = True
+                return True
+            except Exception:
+                pass
 
         # macOS: caffeinate
-        try:
-            self._proc = subprocess.Popen(
-                ["caffeinate", "-dimsu"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self._active = True
-            return True
-        except Exception:
-            pass
+        if sys.platform == "darwin":
+            try:
+                self._proc = subprocess.Popen(
+                    ["caffeinate", "-dimsu"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._active = True
+                return True
+            except Exception:
+                pass
 
+        self._log and self._log(f"Keep-awake: UNSUPPORTED on {sys.platform} — install systemd (Linux), caffeinate (macOS), or set --no-keep-awake")
         return False
 
     def disable(self) -> None:
