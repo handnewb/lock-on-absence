@@ -141,7 +141,7 @@ def main() -> None:
     faces_only = [d[0] for d in all_data]
     labels_only = [d[1] for d in all_data]
     recognizer = cv2.face.LBPHFaceRecognizer_create(
-        radius=1, neighbors=8, grid_x=8, grid_y=8,
+        radius=2, neighbors=8, grid_x=6, grid_y=6,
     )
     recognizer.train(faces_only, np.array(labels_only))
 
