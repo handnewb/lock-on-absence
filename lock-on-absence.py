@@ -270,36 +270,19 @@ def main() -> None:
         log("Blink detection: ON (liveness proof)")
     else:
         log("Blink detection: unavailable (eye cascade missing)")
-
     try:
+        _consecutive_fails = 0
         while True:
             now = time.time()
 
             ret, frame = cap.read()
             if not ret or frame is None:
-                # Camera might be in use by another app (Teams, Zoom, etc.)
-                if not camera_available(args.camera):
-                    if camera_busy_until == 0.0:
-                        log(f"Camera in use by another app — pausing {args.meeting_pause}s (meeting mode)")
-                    camera_busy_until = now + args.meeting_pause
-                elif args.stealth:
-                    pass  # stealth mode: keep retrying silently
-                if camera_busy_until and now < camera_busy_until:
-                    # Still waiting — retry camera
-                    if not args.stealth:
-                        try:
-                            _cap_obj = open_camera(args.camera, FRAME_WIDTH)
-                            cap = _cap_obj
-                            camera_busy_until = 0.0
-                            log("Camera available again — resuming monitoring")
-                            continue
-                        except RuntimeError:
-                            pass
+                _consecutive_fails += 1
+                if _consecutive_fails == 1 or _consecutive_fails % 10 == 0:
+                    log(f"Camera read failed ({_consecutive_fails}x) — retrying...")
                 time.sleep(2)
                 continue
-            else:
-                if camera_busy_until:
-                    camera_busy_until = 0.0
+            _consecutive_fails = 0
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             # Detect faces with current detector (YuNet or Haar)
