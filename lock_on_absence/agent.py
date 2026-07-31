@@ -223,7 +223,7 @@ def _load_recognizer(args, log: Logger) -> tuple[object | None, float]:
     meta_path = model.with_suffix(".json")
     if meta_path.exists():
         try:
-            meta = json.loads(meta_path.read_text())
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log(f"WARNING: unreadable {meta_path.name} ({exc}) — using default threshold")
             return rec, threshold

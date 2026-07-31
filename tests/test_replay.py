@@ -146,7 +146,7 @@ def test_agent_contains_no_presence_logic():
     back into the adapter, the two drift apart again — which is how the repo
     ended up with a fully tested state machine that was never imported.
     """
-    src = (ROOT / "lock_on_absence" / "agent.py").read_text()
+    src = (ROOT / "lock_on_absence" / "agent.py").read_text(encoding="utf-8")
     assert "PresenceStateMachine" in src, "adapter must use the state machine"
     for banned in ("absence_start", "intruder_streak", "static_since",
                    "prev_face_center", "_body_detect_active", "last_face_time",

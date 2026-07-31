@@ -221,8 +221,8 @@ def main() -> None:
             "samples": len(faces_only),
             "users": {str(idx): name for idx, name in enumerate(user_names, start=1)},
         }
-        with open(meta_path, "w") as f:
-            json.dump(meta, f, indent=2)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
         os.chmod(meta_path, 0o600)
         log(f"Metadata saved to: {meta_path}")
         log(f"Recognition threshold: {RECOGNITION_THRESHOLD} (default — edit face_model.json to tune)")

@@ -683,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
         print(sweep(observations, labels, cfg, field_name, values, args.far_window))
 
     if args.json:
-        args.json.write_text(json.dumps(report.to_dict(), indent=2))
+        args.json.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
         print(f"report written to {args.json}")
 
     rc = 0
