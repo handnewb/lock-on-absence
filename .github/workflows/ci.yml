@@ -45,12 +45,12 @@ jobs:
       # The measurement gate. Any change that makes the state machine miss an
       # intruder or lock on the legitimate owner fails the build. This is what
       # replaces "tune the threshold and hope".
+      # NOTE: no backslash line-continuation here — the Windows runner shells
+      # out to pwsh, where '\' is not a line continuation.
       - name: FAR/FRR gate
         run: |
-          lock-on-absence-replay --synthetic --repeat 8 --far-window 12 \
-            --fail-if-far-above 0.0 --fail-if-frr-above 0.0
+          lock-on-absence-replay --synthetic --repeat 8 --far-window 12 --fail-if-far-above 0.0 --fail-if-frr-above 0.0
 
       - name: FAR/FRR gate under 40% detection loss
         run: |
-          lock-on-absence-replay --synthetic --repeat 8 --flicker 0.4 \
-            --far-window 12 --fail-if-far-above 0.15 --fail-if-frr-above 0.05
+          lock-on-absence-replay --synthetic --repeat 8 --flicker 0.4 --far-window 12 --fail-if-far-above 0.15 --fail-if-frr-above 0.05
