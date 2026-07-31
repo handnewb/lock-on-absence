@@ -381,3 +381,64 @@ def test_machine_is_deterministic():
 def test_config_rejects_nonsense():
     with pytest.raises(ValueError):
         Config(on_camera_failure="maybe")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Pause early-exit  (v5.1)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_pause_ends_as_soon_as_camera_returns():
+    """
+    Regression: any process that grabbed the webcam for one second bought a full
+    meeting_pause of blindness, because the pause block returned before looking
+    at obs.camera_ok — information the adapter had already collected.
+    """
+    cfg = Config(meeting_pause=30.0, camera_busy_after=1)
+    psm, st = PresenceStateMachine(cfg), State()
+    assert psm.step(obs(0.0, cam=False, busy=True), st).decision is Decision.PAUSE
+    assert psm.step(obs(2.0, cam=False, busy=True), st).decision is Decision.PAUSE
+    v = psm.step(obs(4.0, faces=1, owner=True), st)          # camera is back
+    assert v.decision is Decision.KEEP, "still blind after the camera returned"
+    assert v.keep_awake is True
+    assert st.paused_until is None
+
+
+def test_pause_still_locks_intruder_once_camera_returns():
+    cfg = Config(meeting_pause=30.0, camera_busy_after=1, intruder_count=2,
+                 intruder_window=6.0, startup_grace=0.0)
+    psm, st = PresenceStateMachine(cfg), State()
+    psm.step(obs(0.0, faces=1, owner=True), st)
+    psm.step(obs(1.0, cam=False, busy=True), st)
+    psm.step(obs(3.0, faces=1), st)                          # camera back, stranger
+    v = psm.step(obs(4.5, faces=1), st)
+    assert v.decision is Decision.LOCK and v.reason is Reason.INTRUDER
+
+
+def test_pause_budget_counts_real_elapsed_time():
+    """meeting_pause_max must mean real seconds of blindness, not nominal windows."""
+    cfg = Config(meeting_pause=30.0, camera_busy_after=1)
+    psm, st = PresenceStateMachine(cfg), State()
+    psm.step(obs(100.0, cam=False, busy=True), st)   # pause armed at 100
+    psm.step(obs(106.0, faces=1, owner=True), st)    # back after 6s
+    assert 5.0 <= st.paused_total <= 7.0, f"accounted {st.paused_total}s for 6s"
+
+
+def test_security_mode_records_clamps_instead_of_hiding_them():
+    cfg = Config(mode=Mode.SECURITY, max_body_only=60.0,
+                 max_without_face=600.0, on_camera_failure="warn")
+    assert cfg.max_body_only == 20.0
+    assert cfg.on_camera_failure == "lock"
+    joined = " | ".join(cfg.clamps)
+    assert "max_body_only" in joined
+    assert "max_without_face" in joined
+    assert "on_camera_failure" in joined
+
+
+def test_no_clamps_reported_when_nothing_was_overridden():
+    assert Config(mode=Mode.SECURITY, max_body_only=15.0).clamps == []
+
+
+def test_convenience_mode_reports_its_relaxation():
+    cfg = Config(mode=Mode.CONVENIENCE, on_camera_failure="lock")
+    assert cfg.on_camera_failure == "warn"
+    assert any("convenience" in c for c in cfg.clamps)

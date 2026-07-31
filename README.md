@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-lightgrey)](https://github.com/handnewb/lock-on-absence)
-[![Version](https://img.shields.io/badge/version-5.0.0-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
+[![Version](https://img.shields.io/badge/version-5.1.0-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![CI](https://github.com/handnewb/lock-on-absence/actions/workflows/ci.yml/badge.svg)](https://github.com/handnewb/lock-on-absence/actions/workflows/ci.yml)
 
@@ -49,7 +49,7 @@ The main loop captures frames from any webcam, detects faces (Haar cascades by d
 - **KEEP** — presence proven, screen stays unlocked
 - **WARN** — transition state, no action yet
 - **LOCK** — lock the workstation for a specific `Reason` (intruder, absence, body-timeout, camera failure, spoof)
-- **PAUSE** — camera is busy (video call); stop deciding for `--meeting-pause` seconds
+- **PAUSE** — camera is busy (video call); stop deciding, and resume the instant the camera is usable again
 
 The agent loop is a dumb adapter: build `Observation` → `step()` → execute `Verdict`. Every decision, timer and threshold lives in the state machine, so the executed code is the tested code. An external watchdog (`lock-on-absence-watchdog`) locks the screen if the agent stops proving it is alive (stale heartbeat, dead PID, or clock tampering).
 
@@ -135,7 +135,7 @@ All four commands also run from the repo root as `python lock-on-absence.py`, `p
 | `--startup-grace` | `5` | Suppress intruder lock right after start (never suppresses absence/camera) |
 | `--on-camera-failure {lock,warn}` | `lock` | Fail-closed vs warn when the camera dies (mode overrides in `security`) |
 | `--camera-fail-grace` | `20` | Seconds of camera failure before fail-closed lock |
-| `--meeting-pause` | `30` | Pause duration when another app holds the camera (triggers after 5 busy checks; 15 min budget) |
+| `--meeting-pause` | `30` | Maximum pause when another app holds the camera. Ends early the moment the camera is readable again, so a one-second grab does not buy 30s of blindness. Triggers after 5 busy checks; 15 min cumulative budget of real elapsed time. |
 | `--anti-spoof-timeout` | `0` | Seconds of perfectly static face before a spoof lock (0 = disabled; weak heuristic, not liveness) |
 | `--any-face` | — | Accept ANY face as owner. INSECURE: disables recognition-based intrusion detection |
 | `--camera` | `0` | Camera index |
@@ -286,7 +286,7 @@ verdict = psm.step(obs, st)
 
 `Config.__post_init__` validates and enforces mode: `security` forces fail-closed camera behavior and clamps `max_body_only`; `convenience` downgrades lock to warn where safe. `Observation.__post_init__` rejects incoherent input (e.g. `owner_recognized` with zero faces) — an adapter bug becomes an exception, not a wrong silent decision.
 
-### Tests (71 passing)
+### Tests (81 passing)
 
 ```bash
 pip install -e ".[dev]"
@@ -332,7 +332,7 @@ lock-on-absence/
 
 ### Key design decisions
 
-1. **The state machine is the product** — every decision is a pure function of `(Observation, State)`, which is why 71 tests run in ~6s with no camera and the executed code is the tested code.
+1. **The state machine is the product** — every decision is a pure function of `(Observation, State)`, which is why 81 tests run in ~7s with no camera and the executed code is the tested code.
 2. **The agent owns no timers and no branches** — any new `if` about presence belongs in `state_machine.py`, not `agent.py` (enforced by CI).
 3. **Fail-closed by default** — dead camera, crashed agent (watchdog), or unhandled exception in the loop all end in a locked screen, never an open one.
 4. **Nothing is tuned without a measurement** — the FAR/FRR harness replaced guess-based threshold tuning; CI gates block regressions.
@@ -340,6 +340,40 @@ lock-on-absence/
 6. **Honest security claims** — no blink-level liveness; the movement anti-spoof is documented as a weak heuristic and off by default.
 7. **All internal durations use `time.monotonic()`** — immune to system clock jumps. The heartbeat file uses `time.time()` only for watchdog compatibility, with future-timestamp tampering treated as suspicious.
 8. **Installers are visible** — opt-in autostart via systemd units / Scheduled Tasks, never a hidden startup script (EDR/stalkerware signature).
+
+---
+
+## What v5.1 changed
+
+Three findings from the post-v5.0 audit, all with regression tests:
+
+**Pause no longer means blind.** The adapter reads the camera every tick, so
+`Observation.camera_ok` already told the state machine when the device came back —
+and the pause branch returned before looking at it. Any process that grabbed the
+webcam for one second bought a full `--meeting-pause` of blindness, during which
+an intruder could not be locked out either. Measured before the fix: 26 seconds of
+`PAUSE` with the camera free and the owner's face visible. After: 0. The pause
+budget now also counts real elapsed time instead of the nominal window, so
+`meeting_pause_max` means real seconds.
+
+**Mode clamps are no longer silent.** `--mode security` overrides settings that
+would weaken it — `--max-body-only 60` becomes 20, `--on-camera-failure warn`
+becomes `lock`. It used to do that without a word, so you believed a flag took
+effect when it had not. Every override is now recorded in `Config.clamps` and
+logged at startup as `NOTE: max_body_only=60 clamped to 20 by mode=security`.
+
+**The model file is integrity-checked.** `enroll` records a SHA-256 of
+`face_model.yml` in `face_model.json`, and the agent refuses to start (exit 3) if
+they disagree. Be precise about what this buys: it is tamper **detection**, not
+prevention. An attacker who can rewrite the model can usually rewrite the JSON
+too. What it does buy is catching corruption, and forcing any tamper to be
+consistent across two files instead of one. Real prevention needs the key in an OS
+keyring (DPAPI / Keychain / Secret Service) — that is on the roadmap, not done.
+
+File permissions are also fixed on Windows: `os.chmod(path, 0o600)` is close to a
+no-op on NTFS, where inherited ACLs can leave the file readable by other local
+accounts. `restrict_file_permissions()` now uses `icacls /inheritance:r` there,
+and reports honestly when it cannot.
 
 ---
 
@@ -356,6 +390,17 @@ lock-on-absence/
 | Liveness detection | ⚠️ Movement-based anti-spoof, off by default | YuNet 5-point landmarks → real yaw |
 | External watchdog | ✅ heartbeat + PID check | — |
 | Multi-factor | ❌ Webcam only | TESSERA/BLE token |
+
+---
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | clean shutdown (Ctrl+C / SIGTERM) |
+| `1` | camera could not be opened, or the loop crashed (screen is locked before exit) |
+| `2` | no face model and `--any-face` not given — refusing to run unprotected |
+| `3` | `face_model.yml` does not match the digest recorded at enrollment |
 
 ---
 

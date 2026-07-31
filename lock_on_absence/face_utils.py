@@ -742,3 +742,46 @@ def camera_is_busy(index: int = 0) -> bool:
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
     return False
+
+
+def restrict_file_permissions(path: str | os.PathLike) -> tuple[bool, str]:
+    """
+    Make a file readable only by its owner, on POSIX *and* Windows.
+
+    `os.chmod(path, 0o600)` is a near no-op on Windows: NTFS uses ACLs, and an
+    inherited ACL from the user profile or the drive root can leave the file
+    readable by other local accounts. `icacls` is the actual mechanism there.
+
+    Returns (ok, description) so the caller can tell the user the truth rather
+    than printing a reassuring message it cannot back up.
+    """
+    path = str(path)
+    if sys.platform == "win32":
+        user = os.environ.get("USERNAME")
+        if not user:
+            return False, "USERNAME not set; could not restrict ACL"
+        try:
+            # /inheritance:r drops inherited ACEs, then grant only this user.
+            r = subprocess.run(
+                ["icacls", path, "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
+                capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                return True, f"ACL restricted to {user}"
+            return False, f"icacls failed: {r.stderr.strip()[:120]}"
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return False, f"icacls unavailable: {exc}"
+    try:
+        os.chmod(path, 0o600)
+        return True, "mode 0600"
+    except OSError as exc:
+        return False, f"chmod failed: {exc}"
+
+
+def file_sha256(path: str | os.PathLike) -> str:
+    """Streaming SHA-256 of a file, hex-encoded."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()

@@ -18,9 +18,7 @@ Tips:
 """
 
 import argparse
-import contextlib
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -32,8 +30,10 @@ from .face_utils import (
     Logger,
     detect_faces,
     estimate_angle,
+    file_sha256,
     load_cascades,
     open_camera,
+    restrict_file_permissions,
 )
 
 # ── Defaults ───────────────────────────────────────────────────────
@@ -209,21 +209,31 @@ def main() -> None:
     recognizer.write(args.output)
     log(f"Model saved to: {args.output}")
 
-    # Restrict model file permissions (P1-4)
-    with contextlib.suppress(OSError):
-        os.chmod(args.output, 0o600)
+    # Restrict model file permissions (P1-4). Reports honestly on failure:
+    # os.chmod is close to a no-op on Windows, where ACLs are the real mechanism.
+    ok, how = restrict_file_permissions(args.output)
+    log(f"Model permissions: {how}" if ok
+        else f"WARNING: could not restrict model permissions — {how}")
+
+    # Integrity digest. This is tamper DETECTION, not prevention: an attacker who
+    # can rewrite face_model.yml can usually rewrite face_model.json too. What it
+    # buys is (a) catching corruption, and (b) forcing any tamper to be
+    # consistent across two files instead of one. Real prevention needs the key
+    # in an OS keyring — see MIGRATION notes.
+    model_digest = file_sha256(args.output)
 
     # Save metadata (user names, sample count)
     try:
         meta_path = str(Path(args.output).with_suffix(".json"))
         meta = {
             "threshold": RECOGNITION_THRESHOLD,
+            "model_sha256": model_digest,
             "samples": len(faces_only),
             "users": {str(idx): name for idx, name in enumerate(user_names, start=1)},
         }
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
-        os.chmod(meta_path, 0o600)
+        restrict_file_permissions(meta_path)
         log(f"Metadata saved to: {meta_path}")
         log(f"Recognition threshold: {RECOGNITION_THRESHOLD} (default — edit face_model.json to tune)")
     except OSError as e:

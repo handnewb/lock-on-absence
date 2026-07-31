@@ -1,0 +1,9 @@
+event_id,event_description,mitre_technique
+1001,Screen locked - unrecognized face detected in front of the workstation,T1078 Valid Accounts
+1002,Screen locked - nobody present for the configured delay,
+1003,Screen locked - face static beyond timeout (weak photo heuristic),T1185 Browser Session Hijacking
+1004,Screen locked - body present but no verified face within the ceiling,
+1005,SCREEN LOCK FAILED - every lock mechanism returned an error; session may be UNLOCKED,T1562 Impair Defenses
+1006,Screen locked - other reason,
+2001,Camera error - no usable signal; fail-closed lock may follow,T1562.001 Disable or Modify Tools
+2002,Agent crashed - external watchdog is now the only layer,T1562.001 Disable or Modify Tools

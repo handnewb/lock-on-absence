@@ -442,3 +442,83 @@ def test_watchdog_prints_installable_definitions():
             capture_output=True, text=True, timeout=60, cwd=ROOT)
         assert r.returncode == 0, r.stderr
         assert "lock_on_absence.watchdog" in r.stdout
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  File protection and model integrity  (v5.1)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_restrict_file_permissions_reports_honestly(tmp_path):
+    """Must never claim success it cannot back up — chmod is ~a no-op on Windows."""
+    from lock_on_absence.face_utils import restrict_file_permissions
+    f = tmp_path / "secret.yml"
+    f.write_text("x")
+    ok, how = restrict_file_permissions(f)
+    assert isinstance(ok, bool) and isinstance(how, str) and how
+    if sys.platform != "win32":
+        assert ok is True
+        assert (f.stat().st_mode & 0o777) == 0o600
+
+
+def test_file_sha256_matches_hashlib(tmp_path):
+    import hashlib
+
+    from lock_on_absence.face_utils import file_sha256
+    f = tmp_path / "m.yml"
+    f.write_bytes(b"model bytes" * 10_000)     # forces multiple read chunks
+    assert file_sha256(f) == hashlib.sha256(f.read_bytes()).hexdigest()
+
+
+def test_agent_refuses_to_start_on_model_digest_mismatch(tmp_path):
+    """
+    A swapped model means a stranger's face becomes the owner. Fail closed.
+    """
+    import cv2
+    import numpy as np
+    model = tmp_path / "face_model.yml"
+    rng = np.random.default_rng(0)
+    rec = cv2.face.LBPHFaceRecognizer_create()
+    rec.train([rng.integers(0, 255, (200, 200), dtype=np.uint8) for _ in range(3)],
+              np.array([1, 1, 1]))
+    rec.write(str(model))
+
+    (tmp_path / "face_model.json").write_text(json.dumps({
+        "threshold": 65,
+        "model_sha256": "0" * 64,          # deliberately wrong
+        "users": {"1": "someone"},
+    }))
+
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    r = subprocess.run(
+        [sys.executable, "-m", "lock_on_absence.agent", "--model", str(model)],
+        capture_output=True, text=True, timeout=180, cwd=tmp_path, env=env)
+    out = r.stdout + r.stderr
+    assert r.returncode == 3, f"expected exit 3, got {r.returncode}\n{out}"
+    assert "does not match the digest" in out
+
+
+def test_agent_accepts_a_matching_digest(tmp_path):
+    import cv2
+    import numpy as np
+
+    from lock_on_absence.face_utils import file_sha256
+    model = tmp_path / "face_model.yml"
+    rng = np.random.default_rng(1)
+    rec = cv2.face.LBPHFaceRecognizer_create()
+    rec.train([rng.integers(0, 255, (200, 200), dtype=np.uint8) for _ in range(3)],
+              np.array([1, 1, 1]))
+    rec.write(str(model))
+    (tmp_path / "face_model.json").write_text(json.dumps({
+        "threshold": 65, "model_sha256": file_sha256(model), "users": {"1": "x"},
+    }))
+
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    # No camera in CI, so the agent exits 1 at camera open -- but it must get
+    # PAST the integrity gate first, which is what this asserts.
+    r = subprocess.run(
+        [sys.executable, "-m", "lock_on_absence.agent", "--model", str(model),
+         "--camera", "99"],
+        capture_output=True, text=True, timeout=180, cwd=tmp_path, env=env)
+    out = r.stdout + r.stderr
+    assert "Model integrity: OK" in out, out
+    assert r.returncode != 3

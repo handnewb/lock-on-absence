@@ -37,6 +37,7 @@ from .face_utils import (
     camera_is_busy,
     detect_faces,
     download_yunet,
+    file_sha256,
     load_cascades,
     lock_screen,
     open_camera,
@@ -227,6 +228,29 @@ def _load_recognizer(args, log: Logger) -> tuple[object | None, float]:
         except (OSError, json.JSONDecodeError) as exc:
             log(f"WARNING: unreadable {meta_path.name} ({exc}) — using default threshold")
             return rec, threshold
+        # Integrity check before trusting the model. A mismatch means the file
+        # changed since enrollment: corruption, or someone swapping in their own
+        # face. Either way, refusing to start beats authorising a stranger.
+        expected = meta.get("model_sha256")
+        if expected:
+            try:
+                actual = file_sha256(model)
+            except OSError as exc:
+                log(f"ERROR: cannot read model for integrity check: {exc}")
+                sys.exit(3)
+            if actual != expected:
+                log(f"ERROR: {model.name} does not match the digest recorded at "
+                    f"enrollment time.")
+                log(f"  expected {expected[:16]}...  actual {actual[:16]}...")
+                log("The model was modified or corrupted. Re-run "
+                    "'lock-on-absence-enroll' to re-enroll, or restore a known-good "
+                    "model. Refusing to start.")
+                sys.exit(3)
+            log("Model integrity: OK")
+        else:
+            log("NOTE: no model_sha256 in metadata (enrolled before v5.1) — "
+                "integrity not verified. Re-run enrollment to enable the check.")
+
         raw = meta.get("threshold", threshold)
         # This file is user-writable. Without a range check anyone could set
         # threshold=1e9 and turn every face into the owner, silently.
@@ -308,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         f"delay={cfg.absence_delay:.0f}s | body-only={cfg.max_body_only:.0f}s | "
         f"ceiling={cfg.max_without_face:.0f}s | "
         f"{'DRY-RUN' if args.no_lock else 'ACTIVE LOCK'}")
+    for clamp in cfg.clamps:
+        log(f"NOTE: {clamp}")
     if cfg.anti_spoof_timeout > 0:
         log("NOTE: --anti-spoof-timeout is a weak heuristic, not liveness detection.")
     log("Ctrl+C to stop")

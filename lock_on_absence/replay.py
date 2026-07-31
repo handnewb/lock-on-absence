@@ -633,6 +633,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # ── gather observations + labels ────────────────────────────────────
+    for clamp in cfg.clamps:
+        print(f"note: {clamp}")
+
     if args.synthetic:
         observations, labels = synth_scenario(args.interval, args.flicker,
                                              repeat=args.repeat)

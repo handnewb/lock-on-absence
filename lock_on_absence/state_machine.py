@@ -94,6 +94,9 @@ class Config:
     anti_spoof_min_move: float = 4.0   # px floor for "it moved"
     on_camera_failure: str = "lock"    # lock | warn
     mode: Mode = Mode.SECURITY
+    # Populated by __post_init__ with any value the mode overrode, so the caller
+    # can tell the user instead of silently ignoring what they asked for.
+    clamps: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if isinstance(self.mode, str):
@@ -101,13 +104,29 @@ class Config:
         if self.on_camera_failure not in ("lock", "warn"):
             raise ValueError("on_camera_failure must be 'lock' or 'warn'")
         # mode is not decoration: it forces the safety-relevant defaults.
+        # Every override is recorded in self.clamps so the agent can log it.
+        # Silently ignoring an explicit --max-body-only 60 is worse than
+        # refusing it: the user believes a setting took effect when it did not.
+        self.clamps = []
+
+        def _clamp(name: str, ceiling: float) -> None:
+            current = getattr(self, name)
+            if current > ceiling:
+                setattr(self, name, ceiling)
+                self.clamps.append(
+                    f"{name}={current:g} clamped to {ceiling:g} by mode=security")
+
         if self.mode is Mode.SECURITY:
-            self.on_camera_failure = "lock"
-            self.max_body_only = min(self.max_body_only, 20.0)
-            self.max_without_face = min(self.max_without_face, 90.0)
-        else:  # CONVENIENCE
-            if self.on_camera_failure == "lock":
-                self.on_camera_failure = "warn"
+            if self.on_camera_failure != "lock":
+                self.clamps.append(
+                    "on_camera_failure='warn' forced to 'lock' by mode=security")
+                self.on_camera_failure = "lock"
+            _clamp("max_body_only", 20.0)
+            _clamp("max_without_face", 90.0)
+        elif self.on_camera_failure == "lock":
+            self.clamps.append(
+                "on_camera_failure='lock' relaxed to 'warn' by mode=convenience")
+            self.on_camera_failure = "warn"
 
 
 @dataclass
@@ -211,16 +230,32 @@ class PresenceStateMachine:
             st.last_proof_of_presence = now
 
         # ── 0. Paused (camera owned by another app) ────────────────────
+        # The adapter reads the camera on every tick, so obs.camera_ok already
+        # tells us whether the device came back. Ignoring it meant any process
+        # that grabbed the webcam for one second bought a full meeting_pause of
+        # blindness — during which an intruder could not be locked out either.
+        # End the pause the moment the camera is usable again.
         if st.paused_until is not None:
-            if now < st.paused_until:
+            pause_started = st.paused_until - cfg.meeting_pause
+            if obs.camera_ok:
+                st.paused_total += max(0.0, now - pause_started)
+                st.paused_until = None
+                st.camera_fail_streak = 0
+                st.first_camera_fail = None
+                st._phase = ""
+                # fall through and evaluate this frame normally
+            elif now < st.paused_until:
                 return Verdict(Decision.PAUSE, Reason.CAMERA_BUSY, keep_awake=False,
                                message=self._phase(st, "paused",
                                                    f"Monitoring paused — camera in use "
                                                    f"({st.paused_until - now:.0f}s left)"),
                                detail={"paused_remaining": round(st.paused_until - now, 1)})
-            st.paused_total += cfg.meeting_pause
-            st.paused_until = None
-            st._phase = ""
+            else:
+                # Budget accounting uses elapsed time, not the nominal window, so
+                # meeting_pause_max means real seconds of blindness.
+                st.paused_total += max(0.0, now - pause_started)
+                st.paused_until = None
+                st._phase = ""
 
         # ── 1. Cooldown after a lock ───────────────────────────────────
         # KEEP here means "do nothing", NOT "unlocked" — keep_awake stays False
