@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Shared utilities for Lock on Absence — face detection, body detection, camera, logging."""
 
-import os
+import contextlib
 import json
+import os
 import signal
 import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Optional
+from typing import ClassVar
 
 import cv2
 import numpy as np
-
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Logger
@@ -21,7 +21,7 @@ import numpy as np
 class Logger:
     """Timestamped logger with optional file output."""
 
-    def __init__(self, filepath: Optional[str] = None):
+    def __init__(self, filepath: str | None = None):
         self.filepath = filepath
 
     def __call__(self, msg: str) -> None:
@@ -33,11 +33,9 @@ class Logger:
             # Windows terminal may not support some Unicode chars
             print(line.encode("ascii", errors="replace").decode(), flush=True)
         if self.filepath:
-            try:
-                with open(self.filepath, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-            except OSError:
-                pass
+            with contextlib.suppress(OSError), \
+                    open(self.filepath, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -86,7 +84,7 @@ def detect_faces(
     Returns deduplicated list of rectangles [(x, y, w, h), ...].
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    h, w = gray.shape
+    _h, w = gray.shape
     all_faces: list = []
 
     for cascade in cascades:
@@ -202,10 +200,6 @@ class BodyDetector:
             diff = cv2.absdiff(small_ref, small_cur)
             mean_diff = float(np.mean(diff))
 
-            # Collect noise samples during normal operation
-            if not self._calibrated and mean_diff > 0:
-                self._noise_samples.append(mean_diff)
-
             return mean_diff < self.threshold
         except Exception:
             return False
@@ -214,13 +208,37 @@ class BodyDetector:
     def calibrated(self) -> bool:
         return self._calibrated
 
-    def complete_calibration(self) -> None:
-        """Finalize baseline calibration. Call only when owner presence is confirmed.
-        Clamps threshold to [8, 25] to prevent runaway values from noisy baselines."""
-        if self._noise_samples and not self._calibrated:
-            baseline = sum(self._noise_samples) / len(self._noise_samples)
-            self.threshold = max(min(baseline * self.calibration_multiplier, 25.0), 8.0)
-            self._calibrated = True
+    def sample_noise(self, gray_frame: np.ndarray) -> None:
+        """Record one baseline sample. Call ONLY when the owner is confirmed present.
+
+        The old code collected these inside present(), which runs only when no
+        face is detected — i.e. the "normal micro-movement" baseline was being
+        measured while the user was absent and the scene was changing.
+        """
+        if self._calibrated or self.ref_frame is None:
+            return
+        try:
+            diff = cv2.absdiff(cv2.resize(self.ref_frame, (160, 120)),
+                               cv2.resize(gray_frame, (160, 120)))
+            mean_diff = float(np.mean(diff))
+        except cv2.error:
+            return
+        if mean_diff > 0:
+            self._noise_samples.append(mean_diff)
+
+    def complete_calibration(self) -> bool:
+        """Finalize the baseline once enough owner-present samples exist.
+
+        Returns True only on the transition. Threshold is clamped to [8,25]:
+        an unclamped multiplier let a noisy baseline produce a threshold so high
+        that "body present" became permanently true and absence locking died.
+        """
+        if self._calibrated or len(self._noise_samples) < self.calibration_samples:
+            return False
+        baseline = sum(self._noise_samples) / len(self._noise_samples)
+        self.threshold = max(min(baseline * self.calibration_multiplier, 25.0), 8.0)
+        self._calibrated = True
+        return True
 
     @property
     def status(self) -> str:
@@ -387,10 +405,8 @@ def create_detector(model_dir: str = ".", prefer_yunet: bool = True) -> tuple:
     if prefer_yunet:
         model_path = os.path.join(model_dir, YUNET_MODEL)
         if os.path.exists(model_path):
-            try:
+            with contextlib.suppress(Exception):
                 return YUNetDetector(model_path), "yunet", {}
-            except Exception:
-                pass
 
     # Fallback: Haar cascades
     cascades = []
@@ -416,7 +432,7 @@ def detect_faces_dnn(detector: YUNetDetector, frame: np.ndarray) -> list:
 def _eventlog_windows(event_id: int, message: str, level: str = "WARNING") -> None:
     """Write to Windows Event Log via eventcreate.exe. No extra dependencies."""
     level_map = {"INFO": "INFORMATION", "WARN": "WARNING", "ERROR": "ERROR"}
-    try:
+    with contextlib.suppress(Exception):
         subprocess.run(
             ["eventcreate", "/ID", str(event_id), "/L", "APPLICATION",
              "/T", level_map.get(level, "WARNING"), "/SO", "LockOnAbsence",
@@ -424,20 +440,16 @@ def _eventlog_windows(event_id: int, message: str, level: str = "WARNING") -> No
             timeout=3, check=False,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-    except Exception:
-        pass
 
 
 def _eventlog_linux(message: str, level: str = "WARNING") -> None:
     """Write to syslog via logger command."""
-    try:
+    with contextlib.suppress(Exception):
         subprocess.run(
             ["logger", "-t", "lock-on-absence", "-p", f"user.{level.lower()}", message],
             timeout=3, check=False,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-    except Exception:
-        pass
 
 
 class EventLogger:
@@ -449,15 +461,19 @@ class EventLogger:
     LOCK_SPOOF = 1003
     LOCK_BODY_TIMEOUT = 1004
     LOCK_FAILED = 1005
+    LOCK_OTHER = 1006
     ERROR_CAMERA = 2001
+    AGENT_CRASH = 2002
 
-    _EVENT_NAMES = {
+    _EVENT_NAMES: ClassVar[dict[int, str]] = {
         1001: "intruder_lock",
         1002: "absence_lock",
         1003: "spoof_lock",
         1004: "body_timeout_lock",
         1005: "lock_failed",
+        1006: "other_lock",
         2001: "camera_error",
+        2002: "agent_crash",
     }
 
     def __init__(self, enabled: bool = False, siem_path: str | None = None, dry_run: bool = False):
@@ -485,27 +501,38 @@ class EventLogger:
             "dry_run": self.dry_run,
             **extra,
         }
-        try:
-            with open(self.siem_path, "a", encoding="utf-8") as f:
-                json.dump(record, f, ensure_ascii=False)
-                f.write("\n")
-        except OSError:
-            pass
+        with contextlib.suppress(OSError), \
+                open(self.siem_path, "a", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False)
+            f.write("\n")
 
-    def intruder_lock(self) -> None:
-        self._emit(self.LOCK_INTRUDER, "Screen locked: intruder detected (non-owner face)", "WARN")
+    _BY_REASON: ClassVar[dict[str, tuple]] = {
+        "intruder":       (1001, "WARN",  "intruder detected (non-owner face)"),
+        "absence":        (1002, "INFO",  "nobody present"),
+        "spoof":          (1003, "WARN",  "face static too long (possible photo)"),
+        "body_timeout":   (1004, "WARN",  "body-only timeout without face re-verification"),
+        "camera_failure": (2001, "ERROR", "no camera signal (fail-closed)"),
+    }
 
-    def absence_lock(self, seconds: float) -> None:
-        msg = f"Screen locked: owner absent for {seconds:.0f}s"
-        self._emit(self.LOCK_ABSENCE, msg, "INFO", {"absence_seconds": round(seconds)})
+    def lock(self, reason: str, ok: bool = True, **detail) -> None:
+        """Single entry point for every lock outcome.
 
-    def spoof_lock(self, seconds: float) -> None:
-        msg = f"Screen locked: possible photo attack (static face {seconds:.0f}s)"
-        self._emit(self.LOCK_SPOOF, msg, "WARN", {"static_seconds": round(seconds)})
+        `ok=False` emits ONLY lock_failed. Emitting both the cause event and the
+        failure event made the SIEM show successful locks that never happened.
+        """
+        if not ok:
+            self._emit(self.LOCK_FAILED,
+                       f"Screen lock FAILED: {reason}", "ERROR",
+                       {"reason": reason, **detail})
+            return
+        event_id, level, text = self._BY_REASON.get(
+            reason, (self.LOCK_OTHER, "WARN", reason))
+        self._emit(event_id, f"Screen locked: {text}", level,
+                   {"reason": reason, **detail})
 
-    def body_timeout_lock(self, seconds: float) -> None:
-        msg = f"Screen locked: body-only timeout ({seconds:.0f}s without face)"
-        self._emit(self.LOCK_BODY_TIMEOUT, msg, "WARN", {"body_only_seconds": round(seconds)})
+    def agent_crash(self, detail: str) -> None:
+        self._emit(self.AGENT_CRASH, f"Agent crashed: {detail}", "ERROR",
+                   {"detail": detail})
 
     def camera_error(self, detail: str) -> None:
         self._emit(self.ERROR_CAMERA, f"Camera error: {detail}", "ERROR", {"detail": detail})
@@ -566,7 +593,7 @@ class KeepAwake:
             if not _have_systemd_inhibit:
                 self._log and self._log("Keep-awake: systemd-inhibit not found — install systemd or use --no-keep-awake")
                 return False
-            try:
+            with contextlib.suppress(Exception):
                 self._proc = subprocess.Popen(
                     ["systemd-inhibit", "--what=idle:sleep",
                      "--why=Lock on Absence: owner present",
@@ -577,12 +604,10 @@ class KeepAwake:
                 )
                 self._active = True
                 return True
-            except Exception:
-                pass
 
         # macOS: caffeinate
         if sys.platform == "darwin":
-            try:
+            with contextlib.suppress(Exception):
                 self._proc = subprocess.Popen(
                     ["caffeinate", "-dimsu"],
                     stdout=subprocess.DEVNULL,
@@ -590,8 +615,6 @@ class KeepAwake:
                 )
                 self._active = True
                 return True
-            except Exception:
-                pass
 
         self._log and self._log(f"Keep-awake: UNSUPPORTED on {sys.platform} — install systemd (Linux), caffeinate (macOS), or set --no-keep-awake")
         return False
@@ -606,10 +629,8 @@ class KeepAwake:
                 self._proc.terminate()
                 self._proc.wait(timeout=2)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     self._proc.kill()
-                except Exception:
-                    pass
             self._proc = None
 
         self._active = False
@@ -671,3 +692,53 @@ def install_signal_handlers(
 
     signal.signal(signal.SIGINT, _cleanup)
     signal.signal(signal.SIGTERM, _cleanup)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Helpers added for the state-machine adapter
+# ═══════════════════════════════════════════════════════════════════════
+
+def safe_face_roi(gray: np.ndarray, rect, min_side: int = 20) -> np.ndarray | None:
+    """
+    Clamp a detection rectangle to the frame and return the ROI, or None.
+
+    YuNet routinely emits negative x/y for faces at the frame edge. An unclamped
+    slice yields a zero-width array and cv2.resize then raises, which used to
+    kill the agent through the generic exception handler.
+    """
+    try:
+        x, y, w, h = (int(v) for v in rect[:4])
+    except (TypeError, ValueError):
+        return None
+    H, W = gray.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(W, x + w), min(H, y + h)
+    if x1 - x0 < min_side or y1 - y0 < min_side:
+        return None
+    return gray[y0:y1, x0:x1]
+
+
+def camera_is_busy(index: int = 0) -> bool:
+    """
+    Best-effort: is another *process* holding the camera?
+
+    Asking cv2.VideoCapture is the wrong question — on Windows it lights the LED
+    just to probe, and on Linux V4L2 permits multiple opens on many drivers, so
+    isOpened() returns True even while Teams is streaming. Asking the OS who owns
+    the device node is the right question.
+
+    Returns False when it cannot tell; the caller degrades to a failure streak.
+    """
+    if sys.platform.startswith("linux"):
+        dev = f"/dev/video{index}"
+        if not os.path.exists(dev):
+            return False
+        for cmd in (["fuser", dev], ["lsof", "-t", dev]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, timeout=3, text=True)
+                if r.stdout.strip():
+                    mine = str(os.getpid())
+                    return any(p != mine for p in r.stdout.split())
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+    return False

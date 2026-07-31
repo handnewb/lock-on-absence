@@ -1,20 +1,56 @@
-name: CI
-on: [push, pull_request]
+name: ci
+
+on:
+  push:
+  pull_request:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Install deps
+          python-version: ${{ matrix.python }}
+
+      # Installing the package is itself a test: it catches a broken
+      # pyproject, a bad entry point and any missing module.
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # pyflakes first. It costs a second and catches the exact class of bug
+      # that shipped twice: names referenced but never assigned.
+      - name: Undefined names
+        run: python -m pyflakes lock_on_absence tests
+
+      - name: Lint
+        run: python -m ruff check lock_on_absence tests
+
+      - name: Tests
+        run: python -m pytest -q
+
+      # Entry points must actually resolve after install.
+      - name: Console scripts resolve
         run: |
-          pip install -r requirements.txt pytest pyflakes
-          pip install opencv-contrib-python
-      - name: pyflakes
+          lock-on-absence --version
+          lock-on-absence-enroll --help
+          lock-on-absence-watchdog --help
+          lock-on-absence-replay --help
+
+      # The measurement gate. Any change that makes the state machine miss an
+      # intruder or lock on the legitimate owner fails the build. This is what
+      # replaces "tune the threshold and hope".
+      - name: FAR/FRR gate
         run: |
-          python -m pyflakes face_utils.py enroll.py lock-on-absence.py presence_state_machine.py 2>&1 | grep -v "imported but unused" || true
-      - name: pytest
-        run: python -m pytest tests/ -v
+          lock-on-absence-replay --synthetic --repeat 8 --far-window 12 \
+            --fail-if-far-above 0.0 --fail-if-frr-above 0.0
+
+      - name: FAR/FRR gate under 40% detection loss
+        run: |
+          lock-on-absence-replay --synthetic --repeat 8 --flicker 0.4 \
+            --far-window 12 --fail-if-far-above 0.15 --fail-if-frr-above 0.05

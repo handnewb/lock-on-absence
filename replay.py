@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backward-compatible shim. Real code lives in lock_on_absence/agent.py
+"""Backward-compatible shim. Real code lives in lock_on_absence/replay.py
 
 Kept so existing install.bat, install.sh, the systemd unit and every README
 command keep working after the package restructure. Prefer the installed
@@ -9,7 +9,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lock_on_absence.agent import main  # noqa: E402
+from lock_on_absence.replay import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main())

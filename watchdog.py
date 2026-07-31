@@ -1,59 +1,15 @@
-"""
-Watchdog — external process that locks the screen if the agent's heartbeat
-goes stale.  Run this as a scheduled task or cron job.
+#!/usr/bin/env python3
+"""Backward-compatible shim. Real code lives in lock_on_absence/watchdog.py
 
-Heartbeat file: lock-on-absence writes the current timestamp to
-`watchdog_heartbeat.txt` every 60s when owner is present.
-
-This script reads the file; if the timestamp is older than MAX_AGE,
-it locks the screen.  This catches crashes, zombs, and kills.
+Kept so existing install.bat, install.sh, the systemd unit and every README
+command keep working after the package restructure. Prefer the installed
+entry points (`lock-on-absence`, `lock-on-absence-enroll`, ...).
 """
 import os
 import sys
-import time
 
-HEARTBEAT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "watchdog_heartbeat.txt")
-MAX_AGE = 120  # seconds — how old can heartbeat be before triggering lock?
-CHECK_INTERVAL = 30  # seconds between checks
-
-
-def lock_now() -> None:
-    """Lock the workstation immediately."""
-    if sys.platform == "win32":
-        import ctypes
-        ctypes.windll.user32.LockWorkStation()
-    else:
-        import subprocess
-        for args in (
-            ["loginctl", "lock-session"],
-            ["xdg-screensaver", "lock"],
-            ["gnome-screensaver-command", "--lock"],
-        ):
-            try:
-                r = subprocess.run(args, timeout=5, check=False,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if r.returncode == 0:
-                    return
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
-
-
-def main() -> None:
-    while True:
-        try:
-            with open(HEARTBEAT_FILE) as f:
-                ts_str = f.read().strip()
-            last_beat = float(ts_str)
-            age = time.time() - last_beat
-            if age > MAX_AGE:
-                print(f"Heartbeat stale ({age:.0f}s) — locking screen")
-                lock_now()
-        except (FileNotFoundError, ValueError):
-            # No heartbeat file yet — agent probably not started
-            pass
-        time.sleep(CHECK_INTERVAL)
-
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lock_on_absence.watchdog import main  # noqa: E402
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

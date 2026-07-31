@@ -11,3 +11,12 @@ build/
 .vscode/
 .idea/
 .venv/
+
+# v5.0 additions
+.venv/
+*.egg-info/
+watchdog_heartbeat.txt
+watchdog_heartbeat.tmp
+*.jsonl
+*.mp4
+siem.log

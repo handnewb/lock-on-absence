@@ -1,101 +1,121 @@
 #!/usr/bin/env bash
-# Lock on Absence — Linux / macOS installer
-# Installs dependencies, tests webcam, and optionally sets up auto-start.
+# ══════════════════════════════════════════════════════════════════════════
+#  install.sh — venv + pip install + systemd user units (agent + watchdog)
+#
+#  Deliberate choices:
+#   * a dedicated venv, because PEP 668 (Ubuntu 23.04+, Debian 12+, Fedora,
+#     Arch) makes a bare `pip install` fail and `set -e` would abort mid-way
+#   * absolute ExecStart, because systemd rejects a relative executable
+#   * Type=notify, because the agent now sends sd_notify(WATCHDOG=1); a
+#     Type=simple service with WatchdogSec never notifies and systemd kills
+#     and restarts it every interval, forever
+#   * autostart is opt-in, asked out loud. A webcam monitor that installs
+#     itself silently is indistinguishable from stalkerware
+# ══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$HERE/.venv"
+UNIT_DIR="$HOME/.config/systemd/user"
 
-echo "================================================"
-echo "  Lock on Absence — Linux/macOS Installer"
-echo "================================================"
-echo ""
+echo "lock-on-absence installer"
+echo "  repo: $HERE"
 
-# 1. Python check
-echo "[1/4] Checking Python..."
-PYTHON=""
-for p in python3 python; do
-    if command -v "$p" &>/dev/null; then
-        PYTHON="$p"
-        break
-    fi
-done
-if [ -z "$PYTHON" ]; then
-    echo "ERROR: Python not found. Install with your package manager."
-    exit 1
+command -v python3 >/dev/null || { echo "ERROR: python3 not found"; exit 1; }
+PY_VER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' \
+  || { echo "ERROR: Python 3.10+ required (found $PY_VER)"; exit 1; }
+echo "  python: $PY_VER"
+
+echo "==> creating venv at $VENV"
+python3 -m venv "$VENV"
+PY="$VENV/bin/python"
+"$PY" -m pip install --quiet --upgrade pip
+echo "==> installing package"
+"$PY" -m pip install --quiet -e "$HERE"
+
+AGENT="$VENV/bin/lock-on-absence"
+WATCHDOG="$VENV/bin/lock-on-absence-watchdog"
+[ -x "$AGENT" ] || { echo "ERROR: entry point missing after install"; exit 1; }
+echo "==> installed: $("$AGENT" --version)"
+
+# ── enrollment ────────────────────────────────────────────────────────────
+if [ ! -f "$HERE/face_model.yml" ]; then
+  cat <<'MSG'
+
+No face model found. Without one the agent refuses to start, on purpose:
+running in --any-face mode means ANY face keeps your screen unlocked, which
+provides no protection against a person.
+
+Enroll now with:
+    .venv/bin/lock-on-absence-enroll
+
+MSG
 fi
-$PYTHON --version
-echo ""
 
-# 2. Dependencies (venv to avoid PEP 668)
-echo "[2/4] Installing dependencies..."
-VENV_DIR="$SCRIPT_DIR/.venv"
-if [ ! -d "$VENV_DIR" ]; then
-    $PYTHON -m venv "$VENV_DIR"
+# ── autostart, opt-in ─────────────────────────────────────────────────────
+read -r -p "Enable autostart at login (agent + watchdog)? [y/N] " REPLY
+if [[ ! "${REPLY:-}" =~ ^[Yy]$ ]]; then
+  echo "==> autostart NOT enabled. Run manually:"
+  echo "      $AGENT --delay 10"
+  echo "      $WATCHDOG --heartbeat $HERE/watchdog_heartbeat.txt"
+  exit 0
 fi
-"$VENV_DIR/bin/pip" install -r requirements.txt --quiet 2>/dev/null || \
-    "$VENV_DIR/bin/pip" install -r requirements.txt --user --quiet
-echo "OK"
-echo ""
 
-PYTHON_ABS="$VENV_DIR/bin/python"
+mkdir -p "$UNIT_DIR"
 
-# 3. Webcam test
-echo "[3/4] Testing webcam..."
-$PYTHON_ABS -c "
-import cv2
-found = False
-for i in range(3):
-    cap = cv2.VideoCapture(i)
-    if cap.isOpened():
-        print(f'Webcam {i}: OK')
-        found = True
-    cap.release()
-if not found:
-    print('WARNING: no webcam found')
-"
-echo ""
-
-# 4. Auto-start (systemd user service)
-echo "[4/4] Setting up auto-start..."
-SERVICE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-mkdir -p "$SERVICE_DIR"
-
-cat > "$SERVICE_DIR/lock-on-absence.service" << EOF
+cat > "$UNIT_DIR/lock-on-absence.service" <<UNIT
 [Unit]
-Description=Lock on Absence — auto screen lock
+Description=Lock on Absence — webcam presence detection
+Documentation=https://github.com/handnewb/lock-on-absence
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# Type=notify pairs with the agent's sd_notify(WATCHDOG=1). Do not change this
+# to simple while WatchdogSec is set, or systemd will kill it every 30s.
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+WorkingDirectory=$HERE
+ExecStart=$AGENT --delay 10 --mode security
+Restart=always
+RestartSec=10
+# Hardening: this process needs a camera and a session bus, nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=default.target
+UNIT
+
+cat > "$UNIT_DIR/lock-on-absence-watchdog.service" <<UNIT
+[Unit]
+Description=Lock on Absence watchdog — locks if the agent stops beating
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=$PYTHON_ABS $SCRIPT_DIR/lock-on-absence.py
-WorkingDirectory=$SCRIPT_DIR
+WorkingDirectory=$HERE
+ExecStart=$WATCHDOG --heartbeat $HERE/watchdog_heartbeat.txt --max-age 120
 Restart=always
 RestartSec=10
-# Watchdog disabled by default — enable via override if sd_notify is implemented
 
 [Install]
 WantedBy=default.target
-EOF
+UNIT
 
-systemctl --user daemon-reload 2>/dev/null || true
-systemctl --user enable lock-on-absence.service 2>/dev/null || true
+systemctl --user daemon-reload
+systemctl --user enable --now lock-on-absence.service
+systemctl --user enable --now lock-on-absence-watchdog.service
 
-echo ""
-echo "================================================"
-echo "  Done!"
-echo ""
-echo "  To enroll your face (recommended):"
-echo "    python3 enroll.py"
-echo ""
-echo "  To start now:"
-echo "    python3 lock-on-absence.py"
-echo "    # or: systemctl --user start lock-on-absence"
-echo ""
-echo "  Auto-start: ENABLED (systemd user service)"
-echo ""
-echo "  To UNINSTALL:"
-echo "    systemctl --user disable lock-on-absence"
-echo "    rm $SERVICE_DIR/lock-on-absence.service"
-echo "================================================"
+echo
+echo "==> autostart ENABLED"
+echo "    status:  systemctl --user status lock-on-absence"
+echo "    logs:    journalctl --user -u lock-on-absence -f"
+echo "    stop:    systemctl --user stop lock-on-absence lock-on-absence-watchdog"
+echo "    remove:  systemctl --user disable --now lock-on-absence{,-watchdog}"

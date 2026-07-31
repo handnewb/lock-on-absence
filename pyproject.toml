@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lock-on-absence"
+dynamic = ["version"]
+description = "Auto-lock your screen when you walk away, using any webcam. Fail-closed, auditable, SIEM-ready."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "handnewb" }]
+keywords = ["security", "screen-lock", "presence-detection", "webcam", "opencv", "siem"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Desktop Environment",
+]
+
+# opencv-contrib-python only — NEVER together with opencv-python. Both ship the
+# same `cv2` module and overwrite each other; depending on install order
+# cv2.face disappears and enrollment dies with AttributeError.
+dependencies = [
+  "opencv-contrib-python>=4.8",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+  "pyflakes>=3.1",
+  "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/handnewb/lock-on-absence"
+Issues = "https://github.com/handnewb/lock-on-absence/issues"
+
+# `python -m lock_on_absence` also works; these are the friendly names.
+[project.scripts]
+lock-on-absence = "lock_on_absence.agent:main"
+lock-on-absence-enroll = "lock_on_absence.enroll:main"
+lock-on-absence-watchdog = "lock_on_absence.watchdog:main"
+lock-on-absence-replay = "lock_on_absence.replay:main"
+
+[tool.setuptools]
+# Explicit, so the root-level compatibility shims are never mistaken for
+# package modules.
+packages = ["lock_on_absence"]
+
+[tool.setuptools.dynamic]
+version = { attr = "lock_on_absence.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "E501",    # line length is handled by the formatter, not the linter
+  "B008",    # argparse defaults in function signatures are fine here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Shims deliberately mutate sys.path before importing.
+"lock-on-absence.py" = ["E402"]
+"enroll.py" = ["E402"]
+"watchdog.py" = ["E402"]
+"replay.py" = ["E402"]
