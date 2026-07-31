@@ -216,7 +216,7 @@ class Report:
 
         lines = [
             "",
-            "═══ FAR / FRR report ═══",
+            "=== FAR / FRR report ===",
             f"  replay duration      {self.duration:8.1f}s over {self.ticks} ticks",
             "",
             f"  FAR  intruder missed {pct(self.far)}   "
