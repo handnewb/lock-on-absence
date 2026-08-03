@@ -19,6 +19,7 @@ Tips:
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -103,7 +104,76 @@ def _safe_roi(gray: np.ndarray, rect: tuple) -> np.ndarray | None:
     return gray[y0:y1, x0:x1]
 
 
-def main() -> None:
+def _self_test(log: Logger) -> int:
+    """
+    Prove the SFace pipeline works on THIS machine before trusting it.
+
+    Exists because the ONNX lives in git-lfs: a naive fetch returns a ~130-byte
+    pointer, cv2 then fails with an opaque ONNX parse error, and since the file
+    exists on disk every later run reuses the broken copy. 30 seconds here saves
+    an afternoon of confusion.
+    """
+    import numpy as _np
+
+    from .recognizers import (
+        SFACE_COSINE_THRESHOLD,
+        SFACE_MIN_BYTES,
+        download_sface,
+    )
+
+    log("SFace self-test")
+    try:
+        path = download_sface(".", log=log)
+    except RuntimeError as exc:
+        log(f"FAIL: {exc}")
+        return 1
+
+    size = os.path.getsize(path)
+    log(f"  [ok] model present: {size / 1_048_576:.1f} MB")
+    if size < SFACE_MIN_BYTES:
+        log("FAIL: file is too small to be the model (git-lfs pointer?)")
+        return 1
+
+    try:
+        sf = cv2.FaceRecognizerSF.create(path, "")
+    except cv2.error as exc:
+        log(f"FAIL: cv2 could not load the ONNX: {exc}")
+        log("      Delete the file and re-run; it is probably a truncated download.")
+        return 1
+    log("  [ok] cv2.FaceRecognizerSF.create")
+
+    rng = _np.random.default_rng(0)
+    img = rng.integers(0, 255, (112, 112, 3), dtype=_np.uint8)
+    feat = sf.feature(img)
+    dims = _np.asarray(feat).reshape(1, -1).shape[1]
+    if dims != 128:
+        log(f"FAIL: expected a 128-d embedding, got {dims}")
+        return 1
+    log(f"  [ok] embedding is {dims}-d")
+
+    self_sim = sf.match(feat, feat, cv2.FaceRecognizerSF_FR_COSINE)
+    if abs(self_sim - 1.0) > 1e-3:
+        log(f"FAIL: self-similarity should be 1.0, got {self_sim:.4f}")
+        return 1
+    log(f"  [ok] self-similarity {self_sim:.5f}")
+
+    other = sf.feature(rng.integers(0, 255, (112, 112, 3), dtype=_np.uint8))
+    cross = sf.match(feat, other, cv2.FaceRecognizerSF_FR_COSINE)
+    log(f"  [--] two random images score {cross:.4f} "
+        f"(threshold {SFACE_COSINE_THRESHOLD}) — noise, not faces; "
+        f"informational only")
+
+    log("")
+    log("SFace works on this machine. Now enroll:")
+    log("    lock-on-absence-enroll --recognizer sface")
+    log("Then MEASURE before switching the default — the published threshold of "
+        f"{SFACE_COSINE_THRESHOLD} is a starting point, not a calibration for your "
+        "camera:")
+    log("    lock-on-absence-replay --video mesa.mp4 --labels mesa.csv")
+    return 0
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="Enroll faces for Lock on Absence")
     parser.add_argument(
         "--samples", type=int, default=SAMPLES,
@@ -129,11 +199,28 @@ def main() -> None:
         "--no-consent", action="store_true",
         help="Skip consent prompt (for automated enrollment; use with caution)",
     )
+    parser.add_argument(
+        "--recognizer", choices=["lbph", "sface"], default="sface",
+        help="Backend to enroll for. Default 'sface': embedding model with a "
+             "published operating point (cosine 0.363, validated on LFW/CFP-FP/"
+             "AgeDB) that transfers across lighting. 'lbph' is the legacy "
+             "backend, kept for one release; its threshold does not transfer and "
+             "was never measured.",
+    )
+    parser.add_argument(
+        "--self-test", action="store_true",
+        help="Verify the SFace ONNX loads and embeds on THIS machine, then exit. "
+             "Run this once after install: the model is git-lfs and a truncated "
+             "download fails with an opaque parse error.",
+    )
     args = parser.parse_args()
 
     log = Logger()
 
     # ── Handle --purge ──
+    if args.self_test:
+        return _self_test(log)
+
     if args.purge:
         model_path = Path(args.output)
         meta_path = model_path.with_suffix(".json")
@@ -246,5 +333,7 @@ def main() -> None:
         log("Enrollment complete! Run: python lock-on-absence.py")
 
 
+
+    return 0
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

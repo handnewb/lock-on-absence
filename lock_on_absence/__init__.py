@@ -5,5 +5,5 @@ Single source of truth for the version. README badges, pyproject and the
 project shipped a README claiming v4.1 while __init__ said 4.0.0.
 """
 
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 __all__ = ["__version__"]

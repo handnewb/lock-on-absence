@@ -363,13 +363,24 @@ class YUNetDetector:
 
     def detect(self, frame: np.ndarray) -> list:
         """Detect faces. Returns [(x, y, w, h), ...] in pixel coordinates."""
+        return [(int(f[0]), int(f[1]), int(f[2]), int(f[3]))
+                for f in self.detect_raw(frame)]
+
+    def detect_raw(self, frame: np.ndarray) -> list:
+        """
+        Full YuNet rows: [x, y, w, h, 5x(lm_x, lm_y), score] — 15 columns.
+
+        SFace's alignCrop needs the landmarks to normalise pose before embedding,
+        and that alignment is most of why embeddings generalise better than LBPH.
+        Passing a bare (x, y, w, h) instead would still "work" and quietly lose
+        accuracy, so the rows are kept intact and SFace rejects short ones.
+        """
         h, w = frame.shape[:2]
         self.detector.setInputSize((w, h))
         _conf, faces = self.detector.detect(frame)
         if faces is None:
             return []
-        # YuNet returns [x, y, w, h, ...landmarks] — keep only first 4
-        return [(int(f[0]), int(f[1]), int(f[2]), int(f[3])) for f in faces]
+        return [np.asarray(f, dtype=np.float32) for f in faces]
 
 
 def download_yunet(target_dir: str = ".") -> str:

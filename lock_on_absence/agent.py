@@ -41,8 +41,9 @@ from .face_utils import (
     load_cascades,
     lock_screen,
     open_camera,
-    safe_face_roi,
 )
+from .recognizers import SFACE_MODEL as SFACE_ONNX_NAME
+from .recognizers import best_of
 from .state_machine import (
     Config,
     Mode,
@@ -66,35 +67,6 @@ HEARTBEAT_NAME = "watchdog_heartbeat.txt"
 # ═══════════════════════════════════════════════════════════════════════
 #  Vision helpers (pure functions — no state)
 # ═══════════════════════════════════════════════════════════════════════
-
-def recognize_faces(
-    recognizer,
-    gray: np.ndarray,
-    faces: list,
-    threshold: float,
-) -> tuple[bool, tuple | None, float | None]:
-    """
-    Return (owner_found, owner_rect, best_confidence).
-
-    ROIs are clamped: YuNet routinely returns negative coordinates for faces at
-    the frame edge, and an unclamped slice produces an empty array that makes
-    cv2.resize raise.
-    """
-    best_conf: float | None = None
-    for rect in faces:
-        roi = safe_face_roi(gray, rect)
-        if roi is None:
-            continue
-        try:
-            _label, conf = recognizer.predict(cv2.resize(roi, (200, 200)))
-        except cv2.error:
-            continue
-        if best_conf is None or conf < best_conf:
-            best_conf = conf
-        if conf < threshold:
-            return True, rect, conf
-    return False, None, best_conf
-
 
 def write_heartbeat(path: Path, log: Logger) -> None:
     """
@@ -180,6 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="LBPH model path (default: ./face_model.yml)")
     g.add_argument("--yunet", action="store_true",
                    help="Use the YuNet DNN detector instead of Haar cascades")
+    g.add_argument("--recognizer", choices=["lbph", "sface"], default=None,
+                   help="Recognition backend. Default: whatever enrollment wrote, "
+                        "preferring sface when its templates exist. sface implies "
+                        "--yunet (it needs the landmarks to align).")
     g.add_argument("--stealth", action="store_true",
                    help="Open/close the camera per frame. NOT RECOMMENDED: suppressing "
                         "the activity LED looks like spyware to EDR and to users.")
@@ -202,12 +178,51 @@ def build_parser() -> argparse.ArgumentParser:
 #  Setup
 # ═══════════════════════════════════════════════════════════════════════
 
-def _load_recognizer(args, log: Logger) -> tuple[object | None, float]:
-    """Return (recognizer, threshold). Exits if no model and --any-face absent."""
-    model = Path(args.model) if args.model else Path.cwd() / "face_model.yml"
-    threshold = RECOGNITION_THRESHOLD
+def _load_recognizer(args, log: Logger):
+    """
+    Return (recognizer_or_None, backend_name). Exits on any unsafe condition.
 
-    if not model.exists():
+    Backend selection order: explicit --recognizer, else whatever enrollment
+    recorded in the metadata, else lbph. Never guess silently — the two backends
+    score in opposite directions, so picking the wrong one and comparing raw
+    numbers would invert the accept/reject decision.
+    """
+    from .recognizers import (
+        LBPH_THRESHOLD,
+        SFACE_COSINE_THRESHOLD,
+        LBPHRecognizer,
+        SFaceRecognizer,
+    )
+
+    model = Path(args.model) if args.model else Path.cwd() / "face_model.yml"
+    meta_path = model.with_suffix(".json")
+    meta: dict = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log(f"WARNING: unreadable {meta_path.name} ({exc}) — using defaults")
+
+    sface_templates = model.parent / "face_model_sface.npz"
+    have_lbph = model.exists()
+    have_sface = sface_templates.exists()
+
+    # Backend selection, in order: explicit --recognizer, then whatever
+    # enrollment recorded, then SFace if its templates exist, then LBPH.
+    #
+    # SFace is preferred because its operating point is published and transfers
+    # across lighting; the LBPH threshold is scene-dependent and the 65 in this
+    # repo was inherited from a different grid configuration and never measured.
+    # Existing LBPH enrollments keep working untouched -- their metadata says so.
+    backend = (args.recognizer
+               or meta.get("recognizer")
+               or ("sface" if have_sface else "lbph"))
+
+    if backend == "sface" and not have_sface:
+        log(f"ERROR: --recognizer sface but {sface_templates.name} is missing.")
+        log("Run: lock-on-absence-enroll --recognizer sface")
+        sys.exit(2)
+    if backend == "lbph" and not have_lbph:
         if not args.any_face:
             log(f"ERROR: no face model at {model}")
             log("Run 'lock-on-absence-enroll' first, or pass --any-face "
@@ -215,59 +230,64 @@ def _load_recognizer(args, log: Logger) -> tuple[object | None, float]:
             sys.exit(2)
         log("WARNING: --any-face — ANY detected face keeps the screen unlocked. "
             "Intruder detection and body verification are DISABLED.")
-        return None, threshold
+        return None, "any-face"
 
-    rec = cv2.face.LBPHFaceRecognizer_create()
-    rec.read(str(model))
-    log(f"Face model: {model}")
-
-    meta_path = model.with_suffix(".json")
-    if meta_path.exists():
+    # ── integrity: the model file IS the trust boundary of this product ──
+    target = sface_templates if backend == "sface" else model
+    expected = meta.get("model_sha256")
+    if expected:
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            log(f"WARNING: unreadable {meta_path.name} ({exc}) — using default threshold")
-            return rec, threshold
-        # Integrity check before trusting the model. A mismatch means the file
-        # changed since enrollment: corruption, or someone swapping in their own
-        # face. Either way, refusing to start beats authorising a stranger.
-        expected = meta.get("model_sha256")
-        if expected:
-            try:
-                actual = file_sha256(model)
-            except OSError as exc:
-                log(f"ERROR: cannot read model for integrity check: {exc}")
-                sys.exit(3)
-            if actual != expected:
-                log(f"ERROR: {model.name} does not match the digest recorded at "
-                    f"enrollment time.")
-                log(f"  expected {expected[:16]}...  actual {actual[:16]}...")
-                log("The model was modified or corrupted. Re-run "
-                    "'lock-on-absence-enroll' to re-enroll, or restore a known-good "
-                    "model. Refusing to start.")
-                sys.exit(3)
-            log("Model integrity: OK")
-        else:
-            log("NOTE: no model_sha256 in metadata (enrolled before v5.1) — "
-                "integrity not verified. Re-run enrollment to enable the check.")
+            actual = file_sha256(target)
+        except OSError as exc:
+            log(f"ERROR: cannot read model for integrity check: {exc}")
+            sys.exit(3)
+        if actual != expected:
+            log(f"ERROR: {target.name} does not match the digest recorded at "
+                f"enrollment time.")
+            log(f"  expected {expected[:16]}...  actual {actual[:16]}...")
+            log("The model was modified or corrupted. Re-run "
+                "'lock-on-absence-enroll', or restore a known-good model. "
+                "Refusing to start.")
+            sys.exit(3)
+        log("Model integrity: OK")
+    else:
+        log("NOTE: no model_sha256 in metadata — integrity not verified. "
+            "Re-run enrollment to enable the check.")
 
-        raw = meta.get("threshold", threshold)
-        # This file is user-writable. Without a range check anyone could set
-        # threshold=1e9 and turn every face into the owner, silently.
-        try:
-            raw = float(raw)
-        except (TypeError, ValueError):
-            raw = threshold
-        if not 20.0 <= raw <= 100.0:
-            log(f"WARNING: threshold {raw} in {meta_path.name} is out of the sane "
-                f"range [20,100] — ignoring it and using {threshold}")
-        else:
-            threshold = raw
-        users = meta.get("users") or {}
-        if users:
-            log(f"Authorized: {', '.join(str(v) for v in users.values())}")
-    log(f"Recognition threshold: {threshold:.0f}")
-    return rec, threshold
+    # ── threshold, range-checked per backend ──
+    default_t = SFACE_COSINE_THRESHOLD if backend == "sface" else LBPH_THRESHOLD
+    lo, hi = (0.0, 1.0) if backend == "sface" else (20.0, 100.0)
+    threshold = default_t
+    raw = meta.get("threshold", default_t)
+    try:
+        raw = float(raw)
+    except (TypeError, ValueError):
+        raw = default_t
+    if not lo <= raw <= hi:
+        log(f"WARNING: threshold {raw} is outside the sane range for {backend} "
+            f"[{lo}, {hi}] — ignoring it and using {default_t}")
+    else:
+        threshold = raw
+
+    users = meta.get("users") or {}
+    if users:
+        log(f"Authorized: {', '.join(str(v) for v in users.values())}")
+
+    if backend == "sface":
+        data = np.load(sface_templates, allow_pickle=False)
+        rec = SFaceRecognizer(
+            model_path=str(model.parent / meta.get("sface_onnx", SFACE_ONNX_NAME)),
+            templates=data["templates"],
+            threshold=threshold,
+            labels=[str(x) for x in data["labels"]] if "labels" in data else None,
+        )
+        log(f"Recognizer: SFace embeddings ({len(rec.templates)} templates), "
+            f"cosine > {threshold:.3f}")
+        return rec, "sface"
+
+    rec = LBPHRecognizer(model, threshold)
+    log(f"Recognizer: LBPH, distance < {threshold:.0f}")
+    return rec, "lbph"
 
 
 def _build_config(args) -> Config:
@@ -298,7 +318,9 @@ def main(argv: list[str] | None = None) -> int:
     event_log = EventLogger(args.event_log, args.siem, dry_run=args.no_lock)
     log(f"lock-on-absence {__version__}")
 
-    recognizer, threshold = _load_recognizer(args, log)
+    recognizer, backend = _load_recognizer(args, log)
+    if backend == "sface":
+        args.yunet = True          # SFace cannot align without YuNet landmarks
 
     if args.yunet:
         try:
@@ -356,17 +378,19 @@ def main(argv: list[str] | None = None) -> int:
 
             # ── reduce to an Observation ───────────────────────────────
             faces: list = []
-            owner, rect, conf = False, None, None
+            owner, rect, score = False, None, None
             gray = None
             if ok:
                 try:
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    faces = (detector.detect(frame) if kind == "yunet"
+                    # SFace needs the full 15-column YuNet row to align on the
+                    # landmarks; a bare rect would silently lose the pose
+                    # normalisation that makes embeddings generalise.
+                    faces = (detector.detect_raw(frame) if kind == "yunet"
                              else detect_faces(detector, frame, SCALE_FACTOR,
                                                MIN_NEIGHBORS, MIN_FACE_SIZE))
                     if recognizer is not None and faces:
-                        owner, rect, conf = recognize_faces(
-                            recognizer, gray, faces, threshold)
+                        owner, rect, score = best_of(recognizer, frame, gray, faces)
                 except cv2.error as exc:
                     log(f"WARNING: frame analysis failed: {exc}")
                     ok, faces = False, []
@@ -380,7 +404,8 @@ def main(argv: list[str] | None = None) -> int:
                 camera_ok=ok,
                 camera_busy=(not ok) and camera_is_busy(args.camera),
                 has_recognizer=recognizer is not None,
-                face_center=((rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0)
+                face_center=((float(rect[0]) + float(rect[2]) / 2.0,
+                              float(rect[1]) + float(rect[3]) / 2.0)
                              if rect is not None else None),
                 face_width=float(rect[2]) if rect is not None else 0.0,
             )
@@ -422,8 +447,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.debug and now - last_debug >= 28:
                 last_debug = now
                 log(f"DEBUG faces={len(faces)} owner={owner} "
-                    f"conf={f'{conf:.0f}' if conf is not None else '-'} "
-                    f"thresh={threshold:.0f} decision={verdict.decision.value} "
+                    f"score=[{score if score is not None else '-'}] "
+                    f"backend={backend} decision={verdict.decision.value} "
                     f"reason={verdict.reason.value} "
                     f"since_face={now - (st.last_proof_of_presence or now):.0f}s")
 
