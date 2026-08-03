@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-lightgrey)](https://github.com/handnewb/lock-on-absence)
-[![Version](https://img.shields.io/badge/version-5.1.0-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
+[![Version](https://img.shields.io/badge/version-5.2.0-brightgreen)](https://github.com/handnewb/lock-on-absence/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![CI](https://github.com/handnewb/lock-on-absence/actions/workflows/ci.yml/badge.svg)](https://github.com/handnewb/lock-on-absence/actions/workflows/ci.yml)
 
@@ -286,7 +286,7 @@ verdict = psm.step(obs, st)
 
 `Config.__post_init__` validates and enforces mode: `security` forces fail-closed camera behavior and clamps `max_body_only`; `convenience` downgrades lock to warn where safe. `Observation.__post_init__` rejects incoherent input (e.g. `owner_recognized` with zero faces) — an adapter bug becomes an exception, not a wrong silent decision.
 
-### Tests (81 passing)
+### Tests (110 passing)
 
 ```bash
 pip install -e ".[dev]"
@@ -332,7 +332,7 @@ lock-on-absence/
 
 ### Key design decisions
 
-1. **The state machine is the product** — every decision is a pure function of `(Observation, State)`, which is why 81 tests run in ~7s with no camera and the executed code is the tested code.
+1. **The state machine is the product** — every decision is a pure function of `(Observation, State)`, which is why 110 tests run in ~4s with no camera and the executed code is the tested code.
 2. **The agent owns no timers and no branches** — any new `if` about presence belongs in `state_machine.py`, not `agent.py` (enforced by CI).
 3. **Fail-closed by default** — dead camera, crashed agent (watchdog), or unhandled exception in the loop all end in a locked screen, never an open one.
 4. **Nothing is tuned without a measurement** — the FAR/FRR harness replaced guess-based threshold tuning; CI gates block regressions.
